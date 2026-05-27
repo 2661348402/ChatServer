@@ -1,0 +1,7 @@
+build/*
+bin/*
+build-*/
+third_party/nginx-*/
+third_party/muduo-*/
+third_party/hiredis-*/
+

@@ -1,0 +1,6 @@
+telnet 127.0.0.1 12345 
+{"msgId":1,"id":1,"password":"123456"}
+{"msgId":1,"id":2,"password":"111111"}
+{"msgId":5,"from":"zhang san","to":2,"message":"give me a job"}
+./ChatServer 127.0.0.1 6000
+./ChatClient 127.0.0.1 8000
