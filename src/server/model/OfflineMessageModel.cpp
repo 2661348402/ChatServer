@@ -1,50 +1,40 @@
 #include "OfflineMessageModel.hpp"
+#include "ConnectionPool.hpp"
+#include <muduo/base/Logging.h>
+#include <sstream>
 
+bool OfflineMsgModel::insert(int userid, const std::string& message) {
+    auto db = ConnectionPool::instance().getConnection();
 
+    std::string sql = "insert into OfflineMessage(userid, message) values("
+        + std::to_string(userid) + "," + db->escape(message) + ")";
 
-
-bool OfflineMsgModel::insert(int userid, const string& message)
-{
-    // 组装SQL语句
-    char sql[1024] = {0};
-    sprintf(sql, "insert into OfflineMessage(userid, message) values(%d, '%s')",
-            userid, message.c_str());
-
-    // 执行插入
-    MySQL db;
-    return db.connect() && db.update(sql);
+    return db->update(sql);
 }
 
-vector<string> OfflineMsgModel::query(int userid)
-{
-    vector<string> vec;
-    MySQL db;
-    if (!db.connect()) return vec;
+std::vector<std::string> OfflineMsgModel::query(int userid) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::vector<std::string> vec;
 
-    char sql[1024] = {0};
-    sprintf(sql, "select message from OfflineMessage where userid = %d", userid);
+    std::string sql = "select message from OfflineMessage where userid = "
+        + std::to_string(userid);
 
-    // 执行查询
-    MYSQL_RES* res = db.query(sql);
-    if (res != nullptr)
-    {
-        // 读取每一行消息
+    MYSQL_RES* res = db->query(sql);
+    if (res != nullptr) {
         MYSQL_ROW row;
-        while ((row = mysql_fetch_row(res)) != nullptr)
-        {
+        while ((row = mysql_fetch_row(res)) != nullptr) {
             vec.push_back(row[0]);
         }
-        // 释放结果集
         mysql_free_result(res);
     }
     return vec;
 }
 
-bool OfflineMsgModel::remove(int userid)
-{
-    char sql[1024] = {0};
-    sprintf(sql, "delete from OfflineMessage where userid = %d", userid);
-    MySQL db;
-    
-    return db.connect() && db.update(sql);
+bool OfflineMsgModel::remove(int userid) {
+    auto db = ConnectionPool::instance().getConnection();
+
+    std::string sql = "delete from OfflineMessage where userid = "
+        + std::to_string(userid);
+
+    return db->update(sql);
 }

@@ -1,82 +1,84 @@
 #include "db.h"
-#include <iostream>
-#include <string>
 #include <muduo/base/Logging.h>
-static string server = "127.0.0.1";
-static string user = "root";
-static string password = "123456";
-static string dbname = "chat";
+#include <cstring>
+#include <vector>
 
-// 构造函数：初始化连接句柄
-MySQL::MySQL()
-{
-    // 分配MYSQL对象，初始化句柄
+MySQL::MySQL() {
     _conn = mysql_init(nullptr);
-    if (_conn == nullptr)
-    {
-        LOG_ERROR << "mysql_init 初始化失败！";
+    if (_conn == nullptr) {
+        LOG_ERROR << "mysql_init failed!";
     }
 }
 
-// 析构函数：释放数据库连接
-MySQL::~MySQL()
-{
-    if (_conn != nullptr)
-    {
-        // 关闭连接
+MySQL::~MySQL() {
+    if (_conn != nullptr) {
         mysql_close(_conn);
     }
 }
 
-// 连接数据库
-bool MySQL::connect()
-{
-    // 这里请根据你的数据库信息修改！！！
-    // 参数：连接句柄、主机、用户名、密码、数据库名、端口、unix_socket、client_flag
+bool MySQL::connect() {
+    return false;
+}
+
+bool MySQL::connect(const std::string& host, int port,
+                     const std::string& user, const std::string& password,
+                     const std::string& dbname) {
     MYSQL* p = mysql_real_connect(_conn,
-                                  server.c_str(),    // 数据库IP
-                                    user.c_str(),         // 用户名
-                                  password.c_str(),       // 密码
-                                  dbname.c_str(),       // 数据库名
-                                  3306,           // 端口
-                                  nullptr,
-                                  0);
-    if (p == nullptr)
-    {
-        LOG_ERROR << "数据库连接失败：" << mysql_error(_conn);
+                                  host.c_str(), user.c_str(),
+                                  password.c_str(), dbname.c_str(),
+                                  port, nullptr, 0);
+    if (p == nullptr) {
+        LOG_ERROR << "MySQL connect failed: " << mysql_error(_conn);
         return false;
     }
-
-    // 设置客户端字符集为utf8，支持中文
     mysql_query(_conn, "set names utf8");
     return true;
 }
 
-// 更新操作（insert、update、delete）
-bool MySQL::update(string sql)
-{
-    if (mysql_query(_conn, sql.c_str()))
-    {
-        cerr << "更新操作失败：" << mysql_error(_conn) << endl;
-        cerr << "失败SQL：" << sql << endl;
+bool MySQL::update(const std::string& sql) {
+    if (mysql_query(_conn, sql.c_str())) {
+        LOG_ERROR << "update failed: " << mysql_error(_conn)
+                  << " SQL: " << sql;
         return false;
     }
     return true;
 }
 
-// 查询操作（select）
-MYSQL_RES* MySQL::query(string sql)
-{
-    if (mysql_query(_conn, sql.c_str()))
-    {
-        cerr << "查询操作失败：" << mysql_error(_conn) << endl;
-        cerr << "失败SQL：" << sql << endl;
+MYSQL_RES* MySQL::query(const std::string& sql) {
+    if (mysql_query(_conn, sql.c_str())) {
+        LOG_ERROR << "query failed: " << mysql_error(_conn)
+                  << " SQL: " << sql;
         return nullptr;
     }
-    // 获取查询结果集
     return mysql_store_result(_conn);
 }
 
-MYSQL* MySQL::getConnection(){
+MYSQL* MySQL::getConnection() {
     return _conn;
+}
+
+std::string MySQL::escape(const std::string& str) {
+    if (!_conn) {
+        LOG_ERROR << "MySQL::escape() called with null connection";
+        return "''";
+    }
+    if (str.empty()) return "''";
+
+    // MySQL 官方要求: 缓冲区最小长度为 (原始长度 * 2 + 1)
+    std::vector<char> buf(str.size() * 2 + 1);
+
+    unsigned long escapedLen = mysql_real_escape_string(
+        _conn, buf.data(), str.c_str(), str.size());
+
+    if (escapedLen == (unsigned long)-1) {
+        LOG_ERROR << "mysql_real_escape_string failed: " << mysql_error(_conn);
+        return "''";
+    }
+
+    std::string result;
+    result.reserve(escapedLen + 2);
+    result += '\'';
+    result.append(buf.data(), escapedLen);
+    result += '\'';
+    return result;
 }

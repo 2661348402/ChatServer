@@ -1,37 +1,30 @@
 #include "FriendModel.hpp"
-#include <iostream>
-using namespace std;
+#include "ConnectionPool.hpp"
+#include <muduo/base/Logging.h>
+#include <sstream>
 
-// 添加好友（双向好友关系）
 bool FriendModel::insert(int userId, int friendId) {
-    // 组装SQL：插入 userid -> friendid
-    MySQL db;
-    if(!db.connect()) return false;
+    auto db = ConnectionPool::instance().getConnection();
 
-    char sql[1024] = {0};
-    sprintf(sql, "insert into Friend(userid, friendid) values(%d, %d)", userId, friendId);
+    std::string sql1 = "insert into Friend(userid, friendid) values("
+        + std::to_string(userId) + "," + std::to_string(friendId) + ")";
+    std::string sql2 = "insert into Friend(userid, friendid) values("
+        + std::to_string(friendId) + "," + std::to_string(userId) + ")";
 
-    return db.update(sql);
-
-    // // 双向好友：再插入 friendid -> userid（业务常用）
-    // sprintf(sql, "insert into friend(userid, friendid) values(%d, %d)", friendId, userId);
-    // return db.update(sql);
+    return db->update(sql1) && db->update(sql2);
 }
 
-// 查询好友列表，返回 User 列表
-vector<User> FriendModel::query(int id) {
-    vector<User> vec;
-    MySQL db;
-    if(!db.connect()) return vec;
+std::vector<User> FriendModel::query(int id) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::vector<User> vec;
 
-    // 联合查询：从 friend 表找到所有好友，再从 user 表获取信息
-    char sql[1024] = {0};
-    sprintf(sql, "select u.id, u.name, u.state from user u inner join Friend f on u.id = f.friendid where f.userid = %d", id);
+    std::string sql = "select u.id, u.name, u.state from user u "
+        "inner join Friend f on u.id = f.friendid where f.userid = "
+        + std::to_string(id);
 
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES* res = db->query(sql);
     if (res != nullptr) {
         MYSQL_ROW row;
-        // 遍历结果集，封装 User 对象
         while ((row = mysql_fetch_row(res)) != nullptr) {
             User user;
             user.setId(atoi(row[0]));
@@ -41,6 +34,5 @@ vector<User> FriendModel::query(int id) {
         }
         mysql_free_result(res);
     }
-
     return vec;
 }

@@ -1,51 +1,41 @@
 #include "GroupModel.hpp"
-#include "db.h"
-#include "GroupUser.hpp"
-#include <iostream>
-using namespace std;
+#include "ConnectionPool.hpp"
+#include <muduo/base/Logging.h>
+#include <sstream>
 
-// 创建群组
-bool GroupModel::createGroup(Group &group) {
-    MySQL mysql;
-    if(!mysql.connect()) return false;
-    char sql[1024] = {0};
-    sprintf(sql, "insert into `AllGroup`(groupname, groupdesc) values('%s', '%s')",
-        group.getName().c_str(),
-        group.getDesc().c_str());
+bool GroupModel::createGroup(Group& group) {
+    auto db = ConnectionPool::instance().getConnection();
 
-    if (mysql.update(sql)) {
-        // 获取刚插入的群组ID
-        group.setId(mysql_insert_id(mysql.getConnection()));
+    std::string sql = "insert into `AllGroup`(groupname, groupdesc) values("
+        + db->escape(group.getName()) + ","
+        + db->escape(group.getDesc()) + ")";
+
+    if (db->update(sql)) {
+        group.setId(mysql_insert_id(db->getConnection()));
         return true;
     }
     return false;
 }
 
-// 加入群组
-void GroupModel::addGroup(int userid, int groupid, string role) {
-    MySQL mysql;
-    if(!mysql.connect()) return;
+void GroupModel::addGroup(int userid, int groupid, const std::string& role) {
+    auto db = ConnectionPool::instance().getConnection();
 
-    char sql[1024] = {0};
-    sprintf(sql, "insert into GroupUser values(%d, %d, '%s')",
-        groupid, userid, role.c_str());
+    std::string sql = "insert into GroupUser values("
+        + std::to_string(groupid) + "," + std::to_string(userid) + ","
+        + db->escape(role) + ")";
 
-    mysql.update(sql);
+    db->update(sql);
 }
 
-// 查询用户加入的所有群组
-vector<Group> GroupModel::queryGroups(int userid) {
-    vector<Group> vec;
-    MySQL mysql;
-    if(!mysql.connect()) return vec;
+std::vector<Group> GroupModel::queryGroups(int userid) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::vector<Group> vec;
 
-    // 1. 先查用户加入了哪些群组
-    char sql[1024] = {0};
-    sprintf(sql, "select a.id,a.groupname,a.groupdesc from `AllGroup` a \
-                  inner join GroupUser b on a.id = b.groupid \
-                  where b.userid = %d", userid);
+    std::string sql = "select a.id,a.groupname,a.groupdesc from `AllGroup` a "
+        "inner join GroupUser b on a.id = b.groupid "
+        "where b.userid = " + std::to_string(userid);
 
-    MYSQL_RES *res = mysql.query(sql);
+    MYSQL_RES* res = db->query(sql);
     if (res != nullptr) {
         MYSQL_ROW row;
         while ((row = mysql_fetch_row(res)) != nullptr) {
@@ -58,13 +48,12 @@ vector<Group> GroupModel::queryGroups(int userid) {
         mysql_free_result(res);
     }
 
-    // 2. 为每个群组查询群成员信息
-    for (Group &group : vec) {
-        sprintf(sql, "select a.id,a.name,a.state,b.grouprole from user a \
-                      inner join GroupUser b on a.id = b.userid \
-                      where b.groupid = %d", group.getId());
+    for (Group& group : vec) {
+        std::string sql2 = "select a.id,a.name,a.state,b.grouprole from user a "
+            "inner join GroupUser b on a.id = b.userid "
+            "where b.groupid = " + std::to_string(group.getId());
 
-        MYSQL_RES *res2 = mysql.query(sql);
+        MYSQL_RES* res2 = db->query(sql2);
         if (res2 != nullptr) {
             MYSQL_ROW row2;
             while ((row2 = mysql_fetch_row(res2)) != nullptr) {
@@ -82,16 +71,14 @@ vector<Group> GroupModel::queryGroups(int userid) {
     return vec;
 }
 
-// 根据群组id，查询群组里所有用户的id（排除自己）
-vector<int> GroupModel::queryGroupUsers(int userid,int groupid) {
-     vector<int> vec;
-    MySQL mysql;
-    if(!mysql.connect()) return vec;
-   
-    char sql[1024] = {0};
-    sprintf(sql, "select userid from GroupUser where groupid = %d and userid != %d", groupid,userid);
+std::vector<int> GroupModel::queryGroupUsers(int userid, int groupid) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::vector<int> vec;
 
-    MYSQL_RES *res = mysql.query(sql);
+    std::string sql = "select userid from GroupUser where groupid = "
+        + std::to_string(groupid) + " and userid != " + std::to_string(userid);
+
+    MYSQL_RES* res = db->query(sql);
     if (res != nullptr) {
         MYSQL_ROW row;
         while ((row = mysql_fetch_row(res)) != nullptr) {

@@ -1,32 +1,31 @@
 #include "Client.hpp"
 #include "json.hpp"
 
-using json = nlohmann::json;
 ChatClient::ChatClient()
-:_sockfd(-1), _running(false)
+    : _sockfd(-1), _running(false)
 {
     initCommandHandler();
 }
+
 void ChatClient::initCommandHandler() {
-    _cmdHandler["help"] = std::bind(&ChatClient::help, this, std::placeholders::_1);
-    _cmdHandler["addfriend"] = std::bind(&ChatClient::addFriend, this, std::placeholders::_1);
-    _cmdHandler["chat"] = std::bind(&ChatClient::oneToOneChat, this, std::placeholders::_1);
-    _cmdHandler["creategroup"] = std::bind(&ChatClient::createGroup, this, std::placeholders::_1);
-    _cmdHandler["addgroup"] = std::bind(&ChatClient::addGroup, this, std::placeholders::_1);
-    _cmdHandler["groupchat"] = std::bind(&ChatClient::groupChat, this, std::placeholders::_1);
-    _cmdHandler["loginout"] = std::bind(&ChatClient::loginOut, this, std::placeholders::_1);
+    using namespace std::placeholders;
+    _cmdHandler["help"] = std::bind(&ChatClient::help, this, _1);
+    _cmdHandler["addfriend"] = std::bind(&ChatClient::addFriend, this, _1);
+    _cmdHandler["chat"] = std::bind(&ChatClient::oneToOneChat, this, _1);
+    _cmdHandler["creategroup"] = std::bind(&ChatClient::createGroup, this, _1);
+    _cmdHandler["addgroup"] = std::bind(&ChatClient::addGroup, this, _1);
+    _cmdHandler["groupchat"] = std::bind(&ChatClient::groupChat, this, _1);
+    _cmdHandler["loginout"] = std::bind(&ChatClient::loginOut, this, _1);
 }
-ChatClient::~ChatClient()
-{
+
+ChatClient::~ChatClient() {
     closeClient();
 }
 
-bool ChatClient::connectServer(const string& ip, int port)
-{
+bool ChatClient::connectServer(const std::string& ip, int port) {
     _sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if(_sockfd < 0)
-    {
-        cerr << "创建套接字失败" << endl;
+    if (_sockfd < 0) {
+        std::cerr << "socket create failed" << std::endl;
         return false;
     }
 
@@ -36,8 +35,7 @@ bool ChatClient::connectServer(const string& ip, int port)
     servAddr.sin_port = htons(port);
     inet_pton(AF_INET, ip.c_str(), &servAddr.sin_addr);
 
-    if(connect(_sockfd, (sockaddr*)&servAddr, sizeof(servAddr)) < 0)
-    {
+    if (connect(_sockfd, (sockaddr*)&servAddr, sizeof(servAddr)) < 0) {
         close(_sockfd);
         _sockfd = -1;
         return false;
@@ -45,169 +43,173 @@ bool ChatClient::connectServer(const string& ip, int port)
     return true;
 }
 
-void ChatClient::recvMsgThread()
-{
-    char buf[1024] = {0};
-    while(_running)
-    {
-        memset(buf, 0, sizeof(buf));
-        int len = recv(_sockfd, buf, sizeof(buf), 0);
-        if(len <= 0)
-        {
-            cout << "服务器断开连接" << endl;
+static bool recvAll(int fd, char* buf, size_t len) {
+    size_t received = 0;
+    while (received < len) {
+        ssize_t n = recv(fd, buf + received, len - received, 0);
+        if (n <= 0) return false;
+        received += n;
+    }
+    return true;
+}
+
+static bool recvFramedMessage(int fd, std::string& out) {
+    uint32_t netLen = 0;
+    if (!recvAll(fd, (char*)&netLen, 4)) return false;
+    uint32_t msgLen = ntohl(netLen);
+    if (msgLen > 1024 * 1024) return false; // safety: max 1MB
+    out.resize(msgLen);
+    if (!recvAll(fd, &out[0], msgLen)) return false;
+    return true;
+}
+
+static void sendFramedMessage(int fd, const std::string& buf) {
+    uint32_t netLen = htonl(buf.size());
+    std::string packet(reinterpret_cast<const char*>(&netLen), 4);
+    packet.append(buf);
+
+    const char* data = packet.c_str();
+    size_t remaining = packet.size();
+    while (remaining > 0) {
+        ssize_t n = send(fd, data, remaining, 0);
+        if (n < 0) return;
+        data += n;
+        remaining -= n;
+    }
+}
+
+void ChatClient::recvMsgThread() {
+    while (_running) {
+        std::string msg;
+        if (!recvFramedMessage(_sockfd, msg)) {
+            std::cout << "server disconnected" << std::endl;
             _running = false;
             break;
         }
-        json js = json::parse(buf);
+
+        auto js = nlohmann::json::parse(msg);
         int msgId = js["msgId"];
-        string from = js["from"];       // 谁发的
-        string msg = js["message"];     // 消息内容
-        // ===================== 你要的格式 =====================
-        if (msgId == 5) {
-            // 一对一：直接打印 【谁：消息】
-            cout << "\n【" << from << "】：" << msg << endl;
-        }
-        else if (msgId == 9) {
-            // 群聊：先打印群名/群ID，再打印谁发的
+        std::string from = js.value("from", "");
+        std::string message = js.value("message", "");
+
+        if (msgId == ONE_CHAT_MSG) {
+            std::cout << "\n[" << from << "]: " << message << std::endl;
+        } else if (msgId == GROUP_CHAT_MSG) {
             int groupid = js["groupId"];
-            cout << "\n【群聊 " << groupid << "】" << endl;
-            cout << "【" << from << "】：" << msg << endl;
+            std::cout << "\n[group " << groupid << "]" << std::endl;
+            std::cout << "[" << from << "]: " << message << std::endl;
         }
-        // ======================================================
         fflush(stdout);
     }
 }
 
-void ChatClient::sendMsg(const string& buf)
-{
-    send(_sockfd, buf.c_str(), buf.size(), 0);
+void ChatClient::sendMsg(const std::string& buf) {
+    sendFramedMessage(_sockfd, buf);
 }
 
-bool ChatClient::login(int id, const string& pwd)
-{
-    json js;
+bool ChatClient::login(int id, const std::string& pwd) {
+    nlohmann::json js;
     js["msgId"] = LOGIN_MSG;
     js["id"] = id;
     js["password"] = pwd;
     sendMsg(js.dump());
 
-    char recvBuf[1024] = {0};
-    int len = recv(_sockfd, recvBuf, sizeof(recvBuf), 0);
-    if(len <= 0) 
-        return false;
+    std::string msg;
+    if (!recvFramedMessage(_sockfd, msg)) return false;
 
-    json res = json::parse(recvBuf);
+    auto res = nlohmann::json::parse(msg);
 
-    // 登录失败
-    if(res["errno"] != 0)
-    {
-        cout << "\n❌ 登录失败：" << res["errMessage"] << endl;
+    if (res["errno"] != 0) {
+        std::cout << "\nlogin failed: " << res["errMessage"] << std::endl;
         return false;
     }
 
-    // ====================== 登录成功：打印 3 类数据 ======================
-    cout << "\n================================================" << endl;
-    cout << "               ✅ 登录成功！" << endl;
-    cout << "================================================" << endl;
+    std::cout << "\n===== Login Success! =====" << std::endl;
 
     _running = true;
     _curUser.setId(id);
     _curUser.setName(res["name"]);
-    // 1. 打印离线消息
+
     if (res.contains("offlineMsg")) {
-        cout << "\n📩 【离线消息】：" << endl;
+        std::cout << "\n[Offline Messages]:" << std::endl;
         for (auto& msgStr : res["offlineMsg"]) {
-            // 取出通用字段
-            json msg = json::parse(msgStr.get<std::string>());
-            string sendtime = msg["sendtime"];
-            string message = msg["message"];
-            int msgId = msg["msgId"];       // 关键：用 msgId 区分类型
-            if (msgId == 5) {
-                // ===================== 一对一消息 =====================
-                string fromName = msg["from"];
-                cout << "[" << sendtime << "] 【个人消息】 " << fromName << "：" << message << endl;
-            }
-            else if (msgId == 9) {
-                // ===================== 群聊消息 =====================
-                int groupId = msg["groupid"];   // 群ID
-                string fromName = msg["from"];
-                cout << "[" << sendtime << "] 【群聊 " << groupId << "】 " << fromName << "：" << message << endl;
+            auto msg = nlohmann::json::parse(msgStr.get<std::string>());
+            std::string sendtime = msg["sendtime"];
+            std::string message = msg["message"];
+            int mid = msg["msgId"];
+            if (mid == ONE_CHAT_MSG) {
+                std::string fromName = msg["from"];
+                std::cout << "[" << sendtime << "] " << fromName << ": " << message << std::endl;
+            } else if (mid == GROUP_CHAT_MSG) {
+                int groupId = msg["groupid"];
+                std::string fromName = msg["from"];
+                std::cout << "[" << sendtime << "] [group " << groupId << "] "
+                          << fromName << ": " << message << std::endl;
             }
         }
     } else {
-        cout << "\n📩 【离线消息】：无新消息" << endl;
+        std::cout << "\n[Offline Messages]: none" << std::endl;
     }
 
-    // 2. 打印好友列表
     if (res.contains("friends")) {
-        cout << "\n👥 【好友列表】：" << endl;
+        std::cout << "\n[Friends]:" << std::endl;
         for (auto& friendJsonStr : res["friends"]) {
-            // 关键：先获取字符串！
-            string jsonStr = friendJsonStr.get<string>();
-            json friendJson = json::parse(jsonStr);
-            cout << "   ID:" << friendJson["id"] 
-                 << "  名称:" << friendJson["name"] 
-                 << "  状态:" << friendJson["state"] << endl;
+            std::string jsonStr = friendJsonStr.get<std::string>();
+            auto friendJson = nlohmann::json::parse(jsonStr);
+            std::cout << "  ID:" << friendJson["id"]
+                      << "  Name:" << friendJson["name"]
+                      << "  State:" << friendJson["state"] << std::endl;
         }
     }
 
-    // 3. 打印群组列表
     if (res.contains("groups")) {
-        cout << "\n🏠 【群组列表】：" << endl;
+        std::cout << "\n[Groups]:" << std::endl;
         for (auto& groupJsonStr : res["groups"]) {
-            string jsonStr = groupJsonStr.get<string>();
-            json groupJson = json::parse(jsonStr);
-            cout << "   群名：" << groupJson["name"] 
-                 << "  描述：" << groupJson["desc"] << endl;
+            std::string jsonStr = groupJsonStr.get<std::string>();
+            auto groupJson = nlohmann::json::parse(jsonStr);
+            std::cout << "  " << groupJson["name"]
+                      << " - " << groupJson["desc"] << std::endl;
         }
     }
 
-    cout << "\n================================================" << endl;
+    std::cout << "==============================" << std::endl;
     return true;
 }
-bool ChatClient::registerUser(const string& name, const string& pwd)
-{
-    json req;
+
+bool ChatClient::registerUser(const std::string& name, const std::string& pwd) {
+    nlohmann::json req;
     req["msgId"] = REG_MSG;
     req["name"] = name;
     req["password"] = pwd;
     sendMsg(req.dump());
 
-    char buf[1024] = {0};
-    int len = recv(_sockfd, buf, sizeof(buf), 0);
-    if(len <= 0)
-        return false;
+    std::string msg;
+    if (!recvFramedMessage(_sockfd, msg)) return false;
 
-    json res = json::parse(buf);
-    if(res["errno"] == 0)
-    {
-        cout << "注册成功，你的账号ID：" << res["id"] << endl;
+    auto res = nlohmann::json::parse(msg);
+    if (res["errno"] == 0) {
+        std::cout << "register success, your ID: " << res["id"] << std::endl;
         return true;
-    }
-    else
-    {
-        cout << "注册失败，用户名已存在" << endl;
+    } else {
+        std::cout << "register failed" << std::endl;
         return false;
     }
 }
 
-// === 聊天主循环（你图里的功能） ===
 void ChatClient::chatMain() {
     _running = true;
-    //创建接收线程
     std::thread recvThread(&ChatClient::recvMsgThread, this);
     recvThread.detach();
 
     std::string cmdLine;
-    std::cout << "✅ 进入聊天界面，输入 help 查看命令\n" << std::endl;
+    std::cout << "Enter chat, type help for commands" << std::endl;
 
     while (_running) {
-        std::cout << "[命令] >> ";
+        std::cout << "[cmd] >> ";
         std::getline(std::cin, cmdLine);
 
         size_t pos = cmdLine.find(':');
         std::string cmd, param;
-
         if (pos == std::string::npos) {
             cmd = cmdLine;
         } else {
@@ -218,157 +220,138 @@ void ChatClient::chatMain() {
         if (_cmdHandler.find(cmd) != _cmdHandler.end()) {
             _cmdHandler[cmd](param);
         } else {
-            std::cout << "❌ 未知命令，输入 help 查看\n";
+            std::cout << "unknown command, type help" << std::endl;
         }
     }
 }
 
-// === 命令实现 ===
 void ChatClient::help(const std::string&) {
-    std::cout << "\n===== 支持命令 =====" << std::endl;
-    std::cout << "help                  : 显示帮助" << std::endl;
-    std::cout << "addfriend:好友ID      : 添加好友" << std::endl;
-    std::cout << "chat:好友ID:消息      : 一对一聊天" << std::endl;
-    std::cout << "creategroup:群名:描述 : 创建群组" << std::endl;
-    std::cout << "addgroup:群ID         : 加入群组" << std::endl;
-    std::cout << "groupchat:群ID:消息   : 群聊" << std::endl;
-    std::cout << "loginout              : 退出登录" << std::endl;
+    std::cout << "\n===== Commands =====" << std::endl;
+    std::cout << "help                  : show help" << std::endl;
+    std::cout << "addfriend:friendID    : add friend" << std::endl;
+    std::cout << "chat:friendID:message : private chat" << std::endl;
+    std::cout << "creategroup:name:desc : create group" << std::endl;
+    std::cout << "addgroup:groupID      : join group" << std::endl;
+    std::cout << "groupchat:groupID:msg : group chat" << std::endl;
+    std::cout << "loginout              : logout" << std::endl;
     std::cout << "====================\n" << std::endl;
 }
 
 void ChatClient::addFriend(const std::string& param) {
-    json js;
+    nlohmann::json js;
     js["msgId"] = ADD_FRIEND_MSG;
     js["id"] = _curUser.getId();
     js["friendId"] = std::stoi(param);
-    send(_sockfd, js.dump().c_str(), js.dump().size(), 0);
-    std::cout << "✅ 已向用户："<<std::stoi(param)<<"发送添加好友请求\n";
+    sendMsg(js.dump());
+    std::cout << "friend request sent to user: " << param << std::endl;
 }
 
 void ChatClient::oneToOneChat(const std::string& param) {
     size_t pos = param.find(':');
-    // 安全判断
     if (pos == std::string::npos) {
-        std::cout << "❌ 消息格式错误！请输入: chat:ID:消息" << std::endl;
+        std::cout << "format: chat:ID:message" << std::endl;
         return;
     }
     int toid = std::stoi(param.substr(0, pos));
-    std::string msg = param.substr(pos + 1);
+    std::string msgStr = param.substr(pos + 1);
 
-    json js;
+    nlohmann::json js;
     js["msgId"] = ONE_CHAT_MSG;
     js["id"] = _curUser.getId();
     js["from"] = _curUser.getName();
     js["toid"] = toid;
-    js["message"] = msg;
-    send(_sockfd, js.dump().c_str(), js.dump().size(), 0);
-    std::cout << "✅ 消息已发送\n";
+    js["message"] = msgStr;
+    sendMsg(js.dump());
+    std::cout << "message sent" << std::endl;
 }
 
 void ChatClient::createGroup(const std::string& param) {
     size_t pos1 = param.find(':');
-    size_t pos2 = param.find(':', pos1 + 1);
     std::string name = param.substr(0, pos1);
     std::string desc = param.substr(pos1 + 1);
 
-    json js;
+    nlohmann::json js;
     js["msgId"] = CREATE_GROUP_MSG;
     js["id"] = _curUser.getId();
     js["groupname"] = name;
     js["groupdesc"] = desc;
-    send(_sockfd, js.dump().c_str(), js.dump().size(), 0);
-    std::cout << "✅ 群组创建请求已发送\n";
+    sendMsg(js.dump());
+    std::cout << "group create request sent" << std::endl;
 }
 
 void ChatClient::addGroup(const std::string& param) {
-    json js;
+    nlohmann::json js;
     js["msgId"] = ADD_GROUP_MSG;
     js["id"] = _curUser.getId();
     js["groupId"] = std::stoi(param);
-    send(_sockfd, js.dump().c_str(), js.dump().size(), 0);
-    std::cout << "✅ 加入群组请求已发送\n";
+    sendMsg(js.dump());
+    std::cout << "join group request sent" << std::endl;
 }
 
 void ChatClient::groupChat(const std::string& param) {
     size_t pos = param.find(':');
     int groupid = std::stoi(param.substr(0, pos));
-    std::string msg = param.substr(pos + 1);
+    std::string msgStr = param.substr(pos + 1);
 
-    json js;
+    nlohmann::json js;
     js["msgId"] = GROUP_CHAT_MSG;
     js["id"] = _curUser.getId();
     js["from"] = _curUser.getName();
     js["groupId"] = groupid;
-    js["message"] = msg;
-    send(_sockfd, js.dump().c_str(), js.dump().size(), 0);
-    std::cout << "✅ 群聊消息已发送\n";
+    js["message"] = msgStr;
+    sendMsg(js.dump());
+    std::cout << "group message sent" << std::endl;
 }
 
 void ChatClient::loginOut(const std::string&) {
-    json js;
+    nlohmann::json js;
     js["msgId"] = LOGIN_OUT_MSG;
     js["id"] = _curUser.getId();
-    send(_sockfd, js.dump().c_str(), js.dump().size(), 0);
+    sendMsg(js.dump());
 
-    // 清空用户信息
     _curUser = User{};
-
-    // 把聊天主循环关掉！回到 mainMenu
     _running = false;
-
-    std::cout << "\n✅ 已退出登录，返回主菜单...\n";
-
+    std::cout << "\nlogged out, returning to menu..." << std::endl;
 }
 
-void ChatClient::mainMenu()
-{
-    while(true)
-    {
-        cout << "\n===== 客户端主菜单 =====" << endl;
-        cout << "1. 登录" << endl;
-        cout << "2. 注册" << endl;
-        cout << "3. 退出" << endl;
-        cout << "请选择操作：";
+void ChatClient::mainMenu() {
+    while (true) {
+        std::cout << "\n===== Main Menu =====" << std::endl;
+        std::cout << "1. Login" << std::endl;
+        std::cout << "2. Register" << std::endl;
+        std::cout << "3. Exit" << std::endl;
+        std::cout << "Select: ";
         int op;
-        cin >> op;
-        cin.ignore();
+        std::cin >> op;
+        std::cin.ignore();
 
-        if(op == 1)
-        {
+        if (op == 1) {
             int id;
-            string pwd;
-            cout << "输入账号："; cin >> id;
-            cout << "输入密码："; cin >> pwd;
-            cin.ignore();
-            if(login(id, pwd))
-            {
+            std::string pwd;
+            std::cout << "ID: "; std::cin >> id;
+            std::cout << "Password: "; std::cin >> pwd;
+            std::cin.ignore();
+            if (login(id, pwd)) {
                 chatMain();
             }
-        }
-        else if(op == 2)
-        {
-            string name, pwd;
-            cout << "输入用户名："; cin >> name;
-            cout << "输入密码："; cin >> pwd;
-            cin.ignore();
-        }
-        else if(op == 3)
-        {
-            cout << "退出客户端" << endl;
+        } else if (op == 2) {
+            std::string name, pwd;
+            std::cout << "Name: "; std::cin >> name;
+            std::cout << "Password: "; std::cin >> pwd;
+            std::cin.ignore();
+            registerUser(name, pwd);
+        } else if (op == 3) {
+            std::cout << "Goodbye" << std::endl;
             break;
-        }
-        else
-        {
-            cout << "无效选项" << endl;
+        } else {
+            std::cout << "invalid option" << std::endl;
         }
     }
 }
 
-void ChatClient::closeClient()
-{
+void ChatClient::closeClient() {
     _running = false;
-    if(_sockfd > 0)
-    {
+    if (_sockfd > 0) {
         close(_sockfd);
         _sockfd = -1;
     }

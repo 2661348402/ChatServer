@@ -1,39 +1,38 @@
 #include "UserModel.hpp"
-#include <iostream>
-using namespace std;
+#include "ConnectionPool.hpp"
+#include "SHA256.hpp"
+#include <muduo/base/Logging.h>
+#include <cstring>
+#include <sstream>
 
-bool UserModel::insert(User& user)
-{
-string sql = "insert into user(name,password,state) values('"
-        + user.getName() + "','"
-        + user.getPwd() + "','"  
-        + user.getState() + "')";
+bool UserModel::insert(User& user) {
+    auto db = ConnectionPool::instance().getConnection();
 
-    MySQL db;
-    if (!db.connect()) return false;
-    if (db.update(sql))
-    {
-        // 获取自增id
-        long long uid = mysql_insert_id(db.getConnection());
+    std::string hash = SHA256::hash(user.getPwd());
+    std::string sql = "insert into user(name,password,state) values("
+        + db->escape(user.getName()) + ","
+        + db->escape(hash) + ","
+        + db->escape(user.getState()) + ")";
+
+    if (db->update(sql)) {
+        long long uid = mysql_insert_id(db->getConnection());
         user.setId((int)uid);
         return true;
     }
     return false;
 }
 
-User UserModel::queryById(int id)
-{
-    string sql = "select id,name,password,state from user where id=" + to_string(id);
-    MySQL db;
-    if (!db.connect()) return User();
+User UserModel::queryById(int id) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::string sql = "select id,name,password,state from user where id="
+        + std::to_string(id);
 
-    MYSQL_RES* res = db.query(sql);
+    MYSQL_RES* res = db->query(sql);
     if (!res) return User();
 
     MYSQL_ROW row = mysql_fetch_row(res);
     User user;
-    if (row)
-    {
+    if (row) {
         user.setId(atoi(row[0]));
         user.setName(row[1]);
         user.setPwd(row[2]);
@@ -43,37 +42,59 @@ User UserModel::queryById(int id)
     return user;
 }
 
-// User UserModel::queryByName(string name)
-// {
-//     string sql = "select id,name,password,state from user where name='" + name + "'";
-//     MySQL db;
-//     if (!db.connect()) return User();
+User UserModel::queryByName(const std::string& name) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::string sql = "select id,name,password,state from user where name="
+        + db->escape(name);
 
-//     MYSQL_RES* res = db.query(sql);
-//     if (!res) return User();
+    MYSQL_RES* res = db->query(sql);
+    if (!res) return User();
 
-//     MYSQL_ROW row = mysql_fetch_row(res);
-//     User user;
-//     if (row)
-//     {
-//         user.setId(atoi(row[0]));
-//         user.setName(row[1]);
-//         user.setPwd(row[2]);
-//         user.setState(atoi(row[3]));
-//     }
-//     mysql_free_result(res);
-//     return user;
-// }
-
-bool UserModel::updateState(User& user)
-{
-    string sql = "update user set state='"+ user.getState() +"' where id="+to_string(user.getId());
-    MySQL db;
-    return db.connect() && db.update(sql);
+    MYSQL_ROW row = mysql_fetch_row(res);
+    User user;
+    if (row) {
+        user.setId(atoi(row[0]));
+        user.setName(row[1]);
+        user.setPwd(row[2]);
+        user.setState(row[3]);
+    }
+    mysql_free_result(res);
+    return user;
 }
 
-bool UserModel::stateReset(){
-    string sql = "update user set state='offline' where state = 'online'";
-    MySQL db;
-    return db.connect() && db.update(sql);
+std::vector<User> UserModel::queryByNameLike(const std::string& keyword) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::string sql = "select id,name,password,state from user where name like '%"
+        + keyword + "%'";
+    // keyword is validated to be alphanumeric before calling
+
+    MYSQL_RES* res = db->query(sql);
+    std::vector<User> result;
+    if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+            User user;
+            user.setId(atoi(row[0]));
+            user.setName(row[1]);
+            user.setPwd(row[2]);
+            user.setState(row[3]);
+            result.push_back(user);
+        }
+        mysql_free_result(res);
+    }
+    return result;
+}
+
+bool UserModel::updateState(User& user) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::string sql = "update user set state="
+        + db->escape(user.getState())
+        + " where id=" + std::to_string(user.getId());
+    return db->update(sql);
+}
+
+bool UserModel::stateReset() {
+    auto db = ConnectionPool::instance().getConnection();
+    std::string sql = "update user set state='offline' where state='online'";
+    return db->update(sql);
 }

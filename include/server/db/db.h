@@ -2,24 +2,25 @@
 #define DB_H_
 #include <mysql/mysql.h>
 #include <string>
-using namespace std;
-// 数据库操作类
-class MySQL{
+
+class MySQL {
 public:
-    //初始化数据库连接
     MySQL();
-    // 释放数据库连接资源
-    ~MySQL( );
-    //连接数据库
+    ~MySQL();
+
     bool connect();
-    // 更新操作
-    bool update(string sql);
-    //查询操作
-    MYSQL_RES *query(string sql);
-    //获取链接
+    bool connect(const std::string& host, int port,
+                 const std::string& user, const std::string& password,
+                 const std::string& dbname);
+
+    bool update(const std::string& sql);
+    MYSQL_RES* query(const std::string& sql);
     MYSQL* getConnection();
+
+    std::string escape(const std::string& str);
+
 private:
-    MYSQL *_conn;
+    MYSQL* _conn;
 };
 
 #endif

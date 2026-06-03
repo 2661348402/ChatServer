@@ -11,7 +11,17 @@ enum EnMsgType {
     CREATE_GROUP_MSG,
     ADD_GROUP_MSG,
     GROUP_CHAT_MSG,
-    LOGIN_OUT_MSG
+    LOGIN_OUT_MSG,
+    // Phase 3 feature extensions
+    PING_MSG,
+    PONG_MSG,
+    MSG_ACK,
+    USER_SEARCH_MSG,
+    USER_SEARCH_ACK,
+    FRIEND_REQUEST_MSG,
+    FRIEND_ACCEPT_MSG,
+    FRIEND_REJECT_MSG,
+    FRIEND_NOTIFY_MSG
 };
 
 #endif
