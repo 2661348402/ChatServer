@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m 'v1.2.0-dev: 业务ACK响应 + Qt客户端集成 + AI上下文文档 *)"
+    ]
+  }
+}

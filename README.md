@@ -48,7 +48,8 @@ git clone https://github.com/chenshuo/muduo.git
 ### 三、编译 & 安装（一步到位）
 ```bash
 cd muduo
-mkdir build
+mkdir build 
+cd build
 cmake ..
 #安装（把库安装到系统目录）
 make && make install

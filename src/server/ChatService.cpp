@@ -77,8 +77,20 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
             std::vector<std::string> groups;
             for (auto& group : groupVec) {
                 nlohmann::json js;
+                js["id"] = group.getId();
                 js["name"] = group.getName();
                 js["desc"] = group.getDesc();
+                // Serialize group members
+                nlohmann::json membersArr = nlohmann::json::array();
+                for (auto& gu : group.getUsers()) {
+                    nlohmann::json m;
+                    m["id"] = gu.getId();
+                    m["name"] = gu.getName();
+                    m["role"] = gu.getRole();
+                    m["state"] = gu.getState();
+                    membersArr.push_back(m);
+                }
+                js["members"] = membersArr;
                 groups.push_back(js.dump());
             }
             response["groups"] = groups;
@@ -232,7 +244,21 @@ void ChatService::addFriend(const muduo::net::TcpConnectionPtr& conn,
                              nlohmann::json& js, muduo::Timestamp) {
     int friendId = js["friendId"];
     int userId = js["id"];
-    _friendModel.insert(userId, friendId);
+
+    nlohmann::json response;
+    response["msgId"] = ADD_FRIEND_MSG_ACK;
+
+    if (_friendModel.insert(userId, friendId)) {
+        User friendUser = _userModel.queryById(friendId);
+        response["errno"] = 0;
+        response["friendId"] = friendId;
+        response["friendName"] = friendUser.getName();
+        response["friendState"] = friendUser.getState();
+    } else {
+        response["errno"] = 1;
+        response["errMessage"] = "failed to add friend";
+    }
+    sendFramed(conn, response.dump());
 }
 
 void ChatService::createGroup(const muduo::net::TcpConnectionPtr& conn,
@@ -242,9 +268,29 @@ void ChatService::createGroup(const muduo::net::TcpConnectionPtr& conn,
     std::string groupdesc = js["groupdesc"];
     Group group(-1, groupname, groupdesc);
 
+    nlohmann::json response;
+    response["msgId"] = CREATE_GROUP_MSG_ACK;
+
     if (_groupModel.createGroup(group)) {
         _groupModel.addGroup(userId, group.getId(), "creator");
+        User creator = _userModel.queryById(userId);
+        response["errno"] = 0;
+        response["groupId"] = group.getId();
+        response["groupName"] = groupname;
+        response["groupDesc"] = groupdesc;
+        nlohmann::json membersArr = nlohmann::json::array();
+        nlohmann::json m;
+        m["id"] = userId;
+        m["name"] = creator.getName();
+        m["role"] = "creator";
+        m["state"] = "online";
+        membersArr.push_back(m);
+        response["members"] = membersArr;
+    } else {
+        response["errno"] = 1;
+        response["errMessage"] = "failed to create group";
     }
+    sendFramed(conn, response.dump());
 }
 
 void ChatService::addGroup(const muduo::net::TcpConnectionPtr& conn,
@@ -252,6 +298,32 @@ void ChatService::addGroup(const muduo::net::TcpConnectionPtr& conn,
     int userId = js["id"];
     int groupId = js["groupId"];
     _groupModel.addGroup(userId, groupId, "normal");
+
+    nlohmann::json response;
+    response["msgId"] = ADD_GROUP_MSG_ACK;
+    response["errno"] = 0;
+    response["groupId"] = groupId;
+
+    // Query updated group info including members
+    std::vector<Group> groups = _groupModel.queryGroups(userId);
+    for (auto& g : groups) {
+        if (g.getId() == groupId) {
+            response["groupName"] = g.getName();
+            response["groupDesc"] = g.getDesc();
+            nlohmann::json membersArr = nlohmann::json::array();
+            for (auto& gu : g.getUsers()) {
+                nlohmann::json m;
+                m["id"] = gu.getId();
+                m["name"] = gu.getName();
+                m["role"] = gu.getRole();
+                m["state"] = gu.getState();
+                membersArr.push_back(m);
+            }
+            response["members"] = membersArr;
+            break;
+        }
+    }
+    sendFramed(conn, response.dump());
 }
 
 void ChatService::groupChat(const muduo::net::TcpConnectionPtr& conn,
