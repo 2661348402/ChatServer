@@ -3,6 +3,11 @@
 #include <cstring>
 #include <iostream>
 
+
+namespace {
+const int REDIS_CONTROL_CHANNEL = 0;
+}
+
 Redis::Redis()
     : _publish_context(nullptr)
     , _subscribe_context(nullptr)
@@ -12,6 +17,7 @@ Redis::Redis()
 }
 
 Redis::~Redis() {
+    _running = false;
     if (_publish_context != nullptr) {
         redisFree(_publish_context);
     }
@@ -44,75 +50,132 @@ bool Redis::connect(const std::string& host, int port) {
         return false;
     }
 
+    // 先订阅控制频道，用来唤醒 observer 线程
+    if (redisAppendCommand(_subscribe_context, "SUBSCRIBE %d", REDIS_CONTROL_CHANNEL) == REDIS_ERR) {
+        LOG_ERROR << "subscribe control channel failed";
+        return false;
+    }
+
+    int done = 0;
+    while (!done) {
+        if (redisBufferWrite(_subscribe_context, &done) == REDIS_ERR) {
+            LOG_ERROR << "write control subscribe failed";
+            return false;
+        }
+    }
+
+    _running = true;
     std::thread t([this]() { observer_channel_message(); });
     t.detach();
+
     LOG_INFO << "Redis connected: " << host << ":" << port;
+
     return true;
 }
 
 bool Redis::publish(int channel, const std::string& message) {
-    redisReply* reply = (redisReply*)redisCommand(
-        _publish_context, "PUBLISH %d %s", channel, message.c_str());
-    if (reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
-        LOG_ERROR << "redis publish error";
-        freeReplyObject(reply);
+    std::lock_guard<std::mutex> lock(_publishMutex);
+
+    if (_publish_context == nullptr) {
+        LOG_ERROR << "redis publish context is null";
         return false;
     }
+
+    redisReply* reply = (redisReply*)redisCommand(
+        _publish_context, "PUBLISH %d %s", channel, message.c_str());
+
+    if (reply == nullptr || reply->type == REDIS_REPLY_ERROR) {
+        LOG_ERROR << "redis publish error";
+        if (reply != nullptr) {
+            freeReplyObject(reply);
+        }
+        return false;
+    }
+
     freeReplyObject(reply);
     return true;
 }
 
 bool Redis::subscribe(int channel) {
-    if (REDIS_ERR == redisAppendCommand(this->_subscribe_context,
-                                         "SUBSCRIBE %d", channel)) {
-        LOG_ERROR << "subscribe command failed";
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(_subMutex);
+        _subCommands.push({RedisSubOp::Subscribe, channel});
     }
-    int done = 0;
-    while (!done) {
-        if (REDIS_ERR == redisBufferWrite(this->_subscribe_context, &done)) {
-            LOG_ERROR << "subscribe buffer write failed";
-            return false;
-        }
-    }
+    publish(REDIS_CONTROL_CHANNEL, "wake");
     return true;
 }
 
 bool Redis::unsubscribe(int channel) {
-    if (REDIS_ERR == redisAppendCommand(this->_subscribe_context,
-                                         "UNSUBSCRIBE %d", channel)) {
-        LOG_ERROR << "unsubscribe command failed";
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(_subMutex);
+        _subCommands.push({RedisSubOp::Unsubscribe, channel});
     }
-    int done = 0;
-    while (!done) {
-        if (REDIS_ERR == redisBufferWrite(this->_subscribe_context, &done)) {
-            LOG_ERROR << "unsubscribe buffer write failed";
-            return false;
-        }
-    }
+    publish(REDIS_CONTROL_CHANNEL, "wake");
     return true;
 }
 
 void Redis::observer_channel_message() {
-    while (true) {
+    while (_running) {
+        processSubCommands();
+
         redisReply* reply = nullptr;
-        if (redisGetReply(_subscribe_context, (void**)&reply) != REDIS_OK) {
+        int ret = redisGetReply(_subscribe_context, (void**)&reply);
+
+        if (ret == REDIS_ERR) {
+            if (_subscribe_context != nullptr && _subscribe_context->err == REDIS_ERR_IO) {
+                // 超时也可能走这里，具体 hiredis 版本表现略有差异
+                continue;
+            }
+
             LOG_ERROR << "redis get reply error";
-            break;
+            continue;
         }
 
-        if (reply != nullptr && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
-            if (strcmp(reply->element[0]->str, "message") == 0) {
-                int channel = atoi(reply->element[1]->str);
-                std::string message = reply->element[2]->str;
-                _notify_message_handler(channel, message);
+        if (reply != nullptr) {
+            if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3) {
+                if (strcmp(reply->element[0]->str, "message") == 0) {
+                    int channel = atoi(reply->element[1]->str);
+                    if(channel==0) continue;
+                    std::string message = reply->element[2]->str;
+                    _notify_message_handler(channel, message);
+                }
             }
+
+            freeReplyObject(reply);
         }
-        freeReplyObject(reply);
     }
 }
-
 void Redis::init_notify_handler(std::function<void(int, std::string)> fn) {
     _notify_message_handler = std::move(fn);
+}
+void Redis::processSubCommands() {
+    std::queue<RedisSubCommand> commands;
+
+    {
+        std::lock_guard<std::mutex> lock(_subMutex);
+        commands.swap(_subCommands);
+    }
+
+    while (!commands.empty()) {
+        RedisSubCommand cmd = commands.front();
+        commands.pop();
+
+        const char* op =
+            cmd.op == RedisSubOp::Subscribe ? "SUBSCRIBE" : "UNSUBSCRIBE";
+
+        LOG_INFO << "redis process command: " << op << " " << cmd.channel;
+
+        if (redisAppendCommand(_subscribe_context, "%s %d", op, cmd.channel) == REDIS_ERR) {
+            LOG_ERROR << "redis append " << op << " failed: "<<_subscribe_context->errstr;
+            continue;
+        }
+
+        int done = 0;
+        while (!done) {
+            if (redisBufferWrite(_subscribe_context, &done) == REDIS_ERR) {
+                LOG_ERROR << "redis write " << op << " failed: "<<_subscribe_context->errstr;
+                break;
+            }
+        }
+    }
 }

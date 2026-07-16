@@ -3,6 +3,7 @@ bin/*
 build-*/
 .claude/
 ai_context/
+doc/study-notes.md
 claude.md
 AGENTS.md
 third_party/*.zip
