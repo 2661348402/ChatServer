@@ -331,21 +331,32 @@ void ChatService::groupChat(const muduo::net::TcpConnectionPtr& conn,
     int userId = js["id"];
     int groupId = js["groupId"];
     std::vector<int> userVec = _groupModel.queryGroupUsers(userId, groupId);
+    std::vector<muduo::net::TcpConnectionPtr> localConns;
+    std::vector<int> nonLocalUsers;
 
     {
         std::lock_guard<std::mutex> lock(connMutex);
-        for (int& user_id : userVec) {
-            auto iter = _userConnMap.find(user_id);
+        for (int uid : userVec) {
+            auto iter = _userConnMap.find(uid);
             if (iter != _userConnMap.end()) {
-                sendFramed(iter->second, js.dump());
-                continue;
+                localConns.push_back(iter->second);
+            }else{
+                nonLocalUsers.push_back(uid);
             }
-            User user = _userModel.queryById(user_id);
-            if (user.getState() == "online") {
-                _redis.publish(user_id, js.dump());
-            } else {
-                _offlineMsgModel.insert(user_id, js.dump());
-            }
+        }
+    }
+
+    std::string msg = js.dump();
+    for(auto& conn:localConns) {
+        sendFramed(conn, msg);
+    }
+
+    for(int uid : nonLocalUsers) {
+        User user = _userModel.queryById(uid);
+        if (user.getState() == "online") {
+            _redis.publish(uid, msg);
+        } else {
+            _offlineMsgModel.insert(uid, msg);
         }
     }
 }
