@@ -2,6 +2,7 @@
 #include "ConnectionPool.hpp"
 #include <muduo/base/Logging.h>
 #include <sstream>
+#include <unordered_map>
 
 bool GroupModel::createGroup(Group& group) {
     auto db = ConnectionPool::instance().getConnection();
@@ -30,42 +31,44 @@ void GroupModel::addGroup(int userid, int groupid, const std::string& role) {
 std::vector<Group> GroupModel::queryGroups(int userid) {
     auto db = ConnectionPool::instance().getConnection();
     std::vector<Group> vec;
+    std::unordered_map<int,size_t> groupIdx;
 
-    std::string sql = "select a.id,a.groupname,a.groupdesc from `AllGroup` a "
-        "inner join GroupUser b on a.id = b.groupid "
-        "where b.userid = " + std::to_string(userid);
+
+    std::string sql =
+        "select g.id,g.groupname,g.groupdesc,"
+        "u.id,u.name,u.state,gm.grouprole "
+        "from `AllGroup` g "
+        "inner join GroupUser self on g.id = self.groupid "
+        "inner join GroupUser gm on g.id = gm.groupid "
+        "inner join user u on gm.userid = u.id "
+        "where self.userid = " + std::to_string(userid) + " "
+        "order by g.id,u.id";
 
     MYSQL_RES* res = db->query(sql);
     if (res != nullptr) {
         MYSQL_ROW row;
         while ((row = mysql_fetch_row(res)) != nullptr) {
-            Group group;
-            group.setId(atoi(row[0]));
-            group.setName(row[1]);
-            group.setDesc(row[2]);
-            vec.push_back(group);
+            int gid = atoi(row[0]);
+            auto it = groupIdx.find(gid);
+            if(it == groupIdx.end()) {
+                //第一次加入
+                Group group;
+                group.setId(gid);
+                group.setName(row[1]);
+                group.setDesc(row[2]);
+                vec.push_back(group);
+                groupIdx[gid] = vec.size() - 1;
+                it = groupIdx.find(gid);
+            }
+            GroupUser gu;
+            gu.setId(atoi(row[3]));
+            gu.setName(row[4]);
+            gu.setState(row[5]);
+            gu.setRole(row[6]);
+            vec[it->second].getUsers().push_back(gu);
+
         }
         mysql_free_result(res);
-    }
-
-    for (Group& group : vec) {
-        std::string sql2 = "select a.id,a.name,a.state,b.grouprole from user a "
-            "inner join GroupUser b on a.id = b.userid "
-            "where b.groupid = " + std::to_string(group.getId());
-
-        MYSQL_RES* res2 = db->query(sql2);
-        if (res2 != nullptr) {
-            MYSQL_ROW row2;
-            while ((row2 = mysql_fetch_row(res2)) != nullptr) {
-                GroupUser gu;
-                gu.setId(atoi(row2[0]));
-                gu.setName(row2[1]);
-                gu.setState(row2[2]);
-                gu.setRole(row2[3]);
-                group.getUsers().push_back(gu);
-            }
-            mysql_free_result(res2);
-        }
     }
 
     return vec;
