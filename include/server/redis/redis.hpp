@@ -8,6 +8,7 @@
 #include <mutex>
 #include <queue>
 #include <condition_variable>
+#include <set>
 
 class Redis {
 public:
@@ -24,6 +25,11 @@ public:
     void processSubCommands();
 
 private:
+    bool reconnectPublish();
+    bool reconnectSubscribe();
+    bool subscribeControlChannel();
+    bool sendSubscribeCommand(const char* op,int channel);
+    bool resubscribeAll();
     enum class RedisSubOp {
         Subscribe,
         Unsubscribe
@@ -43,7 +49,7 @@ private:
     std::function<void(int, std::string)> _notify_message_handler;
     std::string _host;
     int _port;
-
+    std::set<int> _subscribedChannels;
 };
 
 #endif

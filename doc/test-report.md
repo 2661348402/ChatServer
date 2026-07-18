@@ -84,3 +84,17 @@ id      select_type     table   partitions      type    possible_keys   key     
 新方案：1 次 SQL，平均 65.85 ms
 SQL 次数：101 -> 1
 平均提速：57.42x
+
+### Redis 容错与消息降级增强测试
+#### 步骤
+1. 启动MySQL、Redis、两个 ChatServer节点。
+2. 用户A登录节点1，用户B登录节点2。
+3. A 给 B 发消息，确认 Redis 正常时能跨节点收到。
+4. 关闭 Redis。
+5. A 再给 B 发消息，服务端不能崩溃。
+6. 查询offlineMessage 表，确认消息进入离线消息。
+7. 重启 Redis。
+8. 观察日志，确认订阅线程重连并重新订阅。
+9. 再发跨节点消息，确认 Redis 恢复后可以继续发布/订阅。
+#### 结果
+正常

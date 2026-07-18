@@ -150,11 +150,15 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr& conn,
 
     User user = _userModel.queryById(toid);
     if (user.getState() == "online") {
-        _redis.publish(toid, js.dump());
-        return;
+        if (!_redis.publish(toid, js.dump())) {
+            LOG_ERROR << "redis publish failed, degrade to offline message";
+            _offlineMsgModel.insert(toid,  js.dump());
+        }
+    }else{
+        _offlineMsgModel.insert(toid, js.dump());
     }
 
-    _offlineMsgModel.insert(toid, js.dump());
+  
 }
 
 MsgHandler ChatService::getHandler(int msgId) {
@@ -354,7 +358,10 @@ void ChatService::groupChat(const muduo::net::TcpConnectionPtr& conn,
     for(int uid : nonLocalUsers) {
         User user = _userModel.queryById(uid);
         if (user.getState() == "online") {
-            _redis.publish(uid, msg);
+            if(!_redis.publish(uid, msg)){
+                _offlineMsgModel.insert(uid, msg);
+                LOG_ERROR << "redis publish failed, degrade to offline message";
+            }
         } else {
             _offlineMsgModel.insert(uid, msg);
         }

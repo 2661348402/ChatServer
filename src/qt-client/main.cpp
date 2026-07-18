@@ -93,7 +93,7 @@ int main(int argc, char* argv[])
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addOption({{"H", "host"}, "Server host", "host", "127.0.0.1"});
-    parser.addOption({{"P", "port"}, "Server port", "port", "12345"});
+    parser.addOption({{"P", "port"}, "Server port", "port", "6001"});
     parser.process(app);
 
     QString host = parser.value("host");
