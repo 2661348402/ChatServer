@@ -5,6 +5,7 @@
 #include <muduo/net/EventLoop.h>
 #include <muduo/base/Logging.h>
 #include <string>
+#include "ThreadPool.hpp"
 
 class ChatServer {
 public:
@@ -22,6 +23,7 @@ private:
 
     muduo::net::TcpServer _server;
     muduo::net::EventLoop* _loop;
+    ThreadPool _businessPool;
 };
 
 #endif
