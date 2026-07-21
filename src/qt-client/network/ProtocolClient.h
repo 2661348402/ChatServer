@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QVector>
 #include "models/ChatData.h"
+#include <QTimer>
 
 class FramedTcpClient;
 
@@ -32,6 +33,10 @@ public:
     void sendCreateGroup(const QString& name, const QString& desc);
     void sendJoinGroup(int groupId);
     void sendLogout();
+    void sendHeartbeat();
+    void startHeartbeat();
+    void stopHeartbeat();
+    QTimer* m_heartbeatTimer = nullptr;
 
     // State accessors (populated after successful login)
     int  userId()   const { return m_userId; }

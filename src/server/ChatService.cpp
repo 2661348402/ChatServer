@@ -3,6 +3,7 @@
 #include "Group.hpp"
 #include "SHA256.hpp"
 #include <muduo/base/Logging.h>
+#include <muduo/net/EventLoop.h>
 #include <vector>
 #include <string>
 #include <arpa/inet.h>
@@ -52,6 +53,7 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
             {
                 std::lock_guard<std::mutex> lock(connMutex);
                 _userConnMap[user.getId()] = conn;
+                _lastActiveMap[user.getId()] = std::time(nullptr);
             }
 
             _redis.subscribe(id);
@@ -60,6 +62,7 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
             if (!_userModel.updateState(user)) {
                 LOG_ERROR << "update state failed";
             }
+           
 
             nlohmann::json response;
             response["msgId"] = LOG_MSG_ACK;
@@ -181,6 +184,7 @@ ChatService::ChatService() {
     msgHandlerMap.insert({ADD_GROUP_MSG, std::bind(&ChatService::addGroup, this, _1, _2, _3)});
     msgHandlerMap.insert({GROUP_CHAT_MSG, std::bind(&ChatService::groupChat, this, _1, _2, _3)});
     msgHandlerMap.insert({LOGIN_OUT_MSG, std::bind(&ChatService::loginout, this, _1, _2, _3)});
+    msgHandlerMap.insert({PING_MSG,std::bind(&ChatService::heartbeat,this,_1,_2,_3)});
 
     if (_redis.connect()) {
         _redis.init_notify_handler(
@@ -205,10 +209,8 @@ void ChatService::loginout(const muduo::net::TcpConnectionPtr& conn,
     int id = js["id"];
     {
         std::lock_guard<std::mutex> lock(connMutex);
-        auto iter = _userConnMap.find(id);
-        if (iter != _userConnMap.end()) {
-            _userConnMap.erase(iter);
-        }
+            _userConnMap.erase(id);
+            _lastActiveMap.erase(id);
     }
     _redis.unsubscribe(id);
     User user;
@@ -226,17 +228,14 @@ void ChatService::clientConnectException(const muduo::net::TcpConnectionPtr& con
             if (iter->second == conn) {
                 id = iter->first;
                 _userConnMap.erase(iter);
+                _lastActiveMap.erase(id);
+
                 break;
             }
         }
     }
     if (id != -1) {
-        _redis.unsubscribe(id);
-        User user;
-        user.setId(id);
-        user.setState("offline");
-        _userModel.updateState(user);
-        LOG_INFO << "id: " << id << " disconnected";
+        setUserOffline(id,"disconnect");
     }
 }
 
@@ -367,3 +366,79 @@ void ChatService::groupChat(const muduo::net::TcpConnectionPtr& conn,
         }
     }
 }
+
+void ChatService::heartbeat(const muduo::net::TcpConnectionPtr& conn,
+                            nlohmann::json& js,
+                            muduo::Timestamp)
+{
+    int id = js.value("id", 0);
+    bool valid = false;
+
+    {
+        std::lock_guard<std::mutex> lock(connMutex);
+        auto iter = _userConnMap.find(id);
+        if (iter != _userConnMap.end() && iter->second == conn) {
+            _lastActiveMap[id] = std::time(nullptr);
+            valid = true;
+        }
+    }
+
+    if (!valid) {
+        conn->shutdown();
+        return;
+    }
+
+    nlohmann::json response;
+    response["msgId"] = PONG_MSG;
+    response["id"] = id;
+    sendFramed(conn, response.dump());
+    LOG_INFO << "heartbeat received, userid=" << id;
+}
+
+void ChatService::checkHeartbeatTimeouts()
+{
+    std::vector<std::pair<int, muduo::net::TcpConnectionPtr>> expired;
+    std::time_t now = std::time(nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(connMutex);
+
+        for (auto iter = _lastActiveMap.begin(); iter != _lastActiveMap.end();) {
+            int id = iter->first;
+
+            if (now - iter->second > HEARTBEAT_TIMEOUT_SECONDS) {
+                auto connIter = _userConnMap.find(id);
+                if (connIter != _userConnMap.end()) {
+                    expired.push_back({id, connIter->second});
+                    _userConnMap.erase(connIter);
+                }
+                iter = _lastActiveMap.erase(iter);
+            } else {
+                ++iter;
+            }
+        }
+    }
+
+    for (auto& item : expired) {
+        int id = item.first;
+        auto conn = item.second;
+        setUserOffline(id, "heartbeat timeout");
+        conn->getLoop()->runInLoop([conn] {
+            conn->shutdown();
+         });
+    }
+}
+void ChatService::setUserOffline(int id, const std::string& reason)
+{
+    if (!_redis.unsubscribe(id)) {
+        LOG_ERROR << "redis unsubscribe failed, userid=" << id;
+    }
+
+    User user;
+    user.setId(id);
+    user.setState("offline");
+    _userModel.updateState(user);
+
+    LOG_INFO << "userid=" << id << " offline, reason=" << reason;
+}
+               

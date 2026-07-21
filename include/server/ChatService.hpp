@@ -5,6 +5,8 @@
 #include <functional>
 #include <unordered_map>
 #include <mutex>
+#include <ctime>
+#include <vector>
 #include "UserModel.hpp"
 #include "OfflineMessageModel.hpp"
 #include "FriendModel.hpp"
@@ -28,17 +30,28 @@ public:
     void groupChat(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
     void loginout(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
     void redisSubscribeMessage(int channel, std::string message);
+    //添加心跳包
+    void heartbeat(const muduo::net::TcpConnectionPtr& conn,nlohmann::json& js, muduo::Timestamp);
+    void checkHeartbeatTimeouts();
 
+    void setUserOffline(int id, const std::string& reason);
     MsgHandler getHandler(int msgId);
     void clientConnectException(const muduo::net::TcpConnectionPtr& conn);
     bool reset();
+   
 
     static void sendFramed(const muduo::net::TcpConnectionPtr& conn,
                             const std::string& msg);
 
+
+
+
+
+
 private:
     ChatService();
-
+    std::unordered_map<int, std::time_t> _lastActiveMap;    
+    static constexpr int HEARTBEAT_TIMEOUT_SECONDS = 90;
     std::unordered_map<int, MsgHandler> msgHandlerMap;
     UserModel _userModel;
     OfflineMsgModel _offlineMsgModel;

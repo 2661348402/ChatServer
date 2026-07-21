@@ -16,7 +16,9 @@ ChatServer::ChatServer(muduo::net::EventLoop* loop,
         std::bind(&ChatServer::onConnection, this, _1));
     _server.setMessageCallback(
         std::bind(&ChatServer::onMessage, this, _1, _2, _3));
-
+    _loop->runEvery(10.0, [] {
+        ChatService::instance()->checkHeartbeatTimeouts();
+    });
     _server.setThreadNum(4);
 }
 

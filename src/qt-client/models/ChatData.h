@@ -21,6 +21,8 @@ namespace MessageType {
     constexpr int ADD_FRIEND_MSG_ACK    = 11;
     constexpr int CREATE_GROUP_MSG_ACK  = 12;
     constexpr int ADD_GROUP_MSG_ACK     = 13;
+    constexpr int PING_MSG = 14;
+    constexpr int PONG_MSG = 15;    
 }
 
 struct FriendInfo {

@@ -16,6 +16,9 @@ ProtocolClient::ProtocolClient(QObject* parent)
             this, &ProtocolClient::onDisconnected);
     connect(m_tcp, &FramedTcpClient::errorOccurred,
             this, &ProtocolClient::onSocketError);
+    m_heartbeatTimer = new QTimer(this);
+    m_heartbeatTimer->setInterval(30000);
+    connect(m_heartbeatTimer, &QTimer::timeout,this, &ProtocolClient::sendHeartbeat);
 }
 
 ProtocolClient::~ProtocolClient()
@@ -138,6 +141,7 @@ void ProtocolClient::sendLogout()
 
     QJsonDocument doc(js);
     m_tcp->sendFrame(doc.toJson(QJsonDocument::Compact));
+    stopHeartbeat();
 }
 
 // ---- Network callbacks ----
@@ -149,6 +153,7 @@ void ProtocolClient::onConnected()
 
 void ProtocolClient::onDisconnected()
 {
+    stopHeartbeat();
     emit serverDisconnected();
 }
 
@@ -190,6 +195,8 @@ void ProtocolClient::onFrameReceived(const QByteArray& frame)
         break;
     case MessageType::ADD_GROUP_MSG_ACK:
         handleAddGroupAck(json);
+        break;
+    case MessageType::PONG_MSG:
         break;
     default:
         break;  // silently ignore unknown msgIds
@@ -272,6 +279,7 @@ void ProtocolClient::handleLoginAck(const QJsonObject& json)
         m_groups.append(g);
     }
 
+    startHeartbeat();
     emit loginResult(true, 0, QString(),
                      m_userId, m_userName,
                      m_offlineMessages, m_friends, m_groups);
@@ -393,5 +401,31 @@ void ProtocolClient::handleAddGroupAck(const QJsonObject& json)
         m_groups.append(g);
 
         emit joinGroupResult(true, groupId, name, desc);
+    }
+}
+
+void ProtocolClient::sendHeartbeat()
+{
+    if (m_userId <= 0 || !isConnected()) return;
+
+    QJsonObject js;
+    js["msgId"] = MessageType::PING_MSG;
+    js["id"] = m_userId;
+
+    QJsonDocument doc(js);
+    m_tcp->sendFrame(doc.toJson(QJsonDocument::Compact));
+}
+
+void ProtocolClient::startHeartbeat()
+{
+    if (m_heartbeatTimer && !m_heartbeatTimer->isActive()) {
+        m_heartbeatTimer->start();
+    }
+}
+
+void ProtocolClient::stopHeartbeat()
+{
+    if (m_heartbeatTimer) {
+        m_heartbeatTimer->stop();
     }
 }
