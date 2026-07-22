@@ -92,3 +92,21 @@ std::vector<int> GroupModel::queryGroupUsers(int userid, int groupid) {
 
     return vec;
 }
+std::vector<int> GroupModel::queryGroupAllUsers(int groupid) {
+    auto db = ConnectionPool::instance().getConnection();
+    std::vector<int> vec;
+
+    std::string sql = "select userid from GroupUser where groupid = "
+        + std::to_string(groupid);
+
+    MYSQL_RES* res = db->query(sql);
+    if (res != nullptr) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res)) != nullptr) {
+            vec.push_back(atoi(row[0]));
+        }
+        mysql_free_result(res);
+    }
+
+    return vec;
+}

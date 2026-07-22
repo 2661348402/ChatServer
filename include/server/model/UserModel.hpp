@@ -2,7 +2,7 @@
 #define USERMODEL_H_
 #include "User.hpp"
 #include <vector>
-
+#include <unordered_map>
 class UserModel {
 public:
     bool insert(User& user);
@@ -11,6 +11,7 @@ public:
     std::vector<User> queryByNameLike(const std::string& keyword);
     bool updateState(User& user);
     bool stateReset();
+    std::unordered_map<int, std::string> queryStatesByIds(const std::vector<int>& ids);
 };
 
 #endif

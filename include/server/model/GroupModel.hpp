@@ -11,6 +11,7 @@ public:
     void addGroup(int userid, int groupid, const std::string& role);
     std::vector<Group> queryGroups(int userid);
     std::vector<int> queryGroupUsers(int userid, int groupid);
+    std::vector<int> queryGroupAllUsers(int groupid);
 };
 
 #endif

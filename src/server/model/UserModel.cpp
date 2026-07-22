@@ -98,3 +98,32 @@ bool UserModel::stateReset() {
     std::string sql = "update user set state='offline' where state='online'";
     return db->update(sql);
 }
+
+std::unordered_map<int, std::string>UserModel::queryStatesByIds(const std::vector<int>& ids) {
+    std::unordered_map<int, std::string> states;
+    if (ids.empty()) {
+        return states;
+    }
+
+    auto db = ConnectionPool::instance().getConnection();
+
+    std::string sql = "select id,state from user where id in (";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) {
+            sql += ",";
+        }
+        sql += std::to_string(ids[i]);
+    }
+    sql += ")";
+
+    MYSQL_RES* res = db->query(sql);
+    if (res != nullptr) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res)) != nullptr) {
+            states[atoi(row[0])] = row[1];
+        }
+        mysql_free_result(res);
+    }
+
+    return states;
+}

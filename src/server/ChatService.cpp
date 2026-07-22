@@ -10,46 +10,57 @@
 
 using namespace std::placeholders;
 
-ChatService* ChatService::instance() {
+ChatService *ChatService::instance()
+{
     static ChatService service;
     return &service;
 }
 
-void ChatService::sendFramed(const muduo::net::TcpConnectionPtr& conn,
-                              const std::string& msg) {
+void ChatService::sendFramed(const muduo::net::TcpConnectionPtr &conn,
+                             const std::string &msg)
+{
     uint32_t netLen = htonl(msg.size());
-    std::string packet(reinterpret_cast<const char*>(&netLen), 4);
+    std::string packet(reinterpret_cast<const char *>(&netLen), 4);
     packet.append(msg);
     conn->send(packet);
 }
 
-void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
-                         nlohmann::json& js, muduo::Timestamp) {
+void ChatService::login(const muduo::net::TcpConnectionPtr &conn,
+                        nlohmann::json &js, muduo::Timestamp)
+{
     LOG_INFO << "do login thing";
     int id = js["id"];
     std::string pwd = js["password"];
     User user = _userModel.queryById(id);
 
-    if (user.getId() == -1) {
+    if (user.getId() == -1)
+    {
         nlohmann::json response;
         response["msgId"] = LOG_MSG_ACK;
         response["errno"] = 1;
         response["errMessage"] = "user not exist";
         sendFramed(conn, response.dump());
-    } else if (user.getPwd() != SHA256::hash(pwd)) {
+    }
+    else if (user.getPwd() != SHA256::hash(pwd))
+    {
         nlohmann::json response;
         response["msgId"] = LOG_MSG_ACK;
         response["errno"] = 2;
         response["errMessage"] = "password error";
         sendFramed(conn, response.dump());
-    } else {
-        if (user.getState() == "online") {
+    }
+    else
+    {
+        if (user.getState() == "online")
+        {
             nlohmann::json response;
             response["msgId"] = LOG_MSG_ACK;
             response["errno"] = 3;
             response["errMessage"] = "already online";
             sendFramed(conn, response.dump());
-        } else {
+        }
+        else
+        {
             {
                 std::lock_guard<std::mutex> lock(connMutex);
                 _userConnMap[user.getId()] = conn;
@@ -59,10 +70,10 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
             _redis.subscribe(id);
 
             user.setState("online");
-            if (!_userModel.updateState(user)) {
+            if (!_userModel.updateState(user))
+            {
                 LOG_ERROR << "update state failed";
             }
-           
 
             nlohmann::json response;
             response["msgId"] = LOG_MSG_ACK;
@@ -71,21 +82,24 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
             response["name"] = user.getName();
 
             std::vector<std::string> messages = _offlineMsgModel.query(user.getId());
-            if (!messages.empty()) {
+            if (!messages.empty())
+            {
                 response["offlineMsg"] = messages;
                 _offlineMsgModel.remove(user.getId());
             }
 
             std::vector<Group> groupVec = _groupModel.queryGroups(id);
             std::vector<std::string> groups;
-            for (auto& group : groupVec) {
+            for (auto &group : groupVec)
+            {
                 nlohmann::json js;
                 js["id"] = group.getId();
                 js["name"] = group.getName();
                 js["desc"] = group.getDesc();
                 // Serialize group members
                 nlohmann::json membersArr = nlohmann::json::array();
-                for (auto& gu : group.getUsers()) {
+                for (auto &gu : group.getUsers())
+                {
                     nlohmann::json m;
                     m["id"] = gu.getId();
                     m["name"] = gu.getName();
@@ -100,7 +114,8 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
 
             std::vector<std::string> friendVec;
             std::vector<User> userVec = _friendModel.query(id);
-            for (auto& u : userVec) {
+            for (auto &u : userVec)
+            {
                 nlohmann::json js;
                 js["id"] = u.getId();
                 js["name"] = u.getName();
@@ -113,8 +128,9 @@ void ChatService::login(const muduo::net::TcpConnectionPtr& conn,
     }
 }
 
-void ChatService::reg(const muduo::net::TcpConnectionPtr& conn,
-                       nlohmann::json& js, muduo::Timestamp) {
+void ChatService::reg(const muduo::net::TcpConnectionPtr &conn,
+                      nlohmann::json &js, muduo::Timestamp)
+{
     LOG_INFO << "do reg thing";
     std::string name = js["name"];
     std::string pwd = js["password"];
@@ -123,13 +139,16 @@ void ChatService::reg(const muduo::net::TcpConnectionPtr& conn,
     user.setPwd(pwd);
 
     bool state = _userModel.insert(user);
-    if (state) {
+    if (state)
+    {
         nlohmann::json response;
         response["msgId"] = REG_MSG_ACK;
         response["errno"] = 0;
         response["id"] = user.getId();
         sendFramed(conn, response.dump());
-    } else {
+    }
+    else
+    {
         nlohmann::json response;
         response["msgId"] = REG_MSG_ACK;
         response["errno"] = 1;
@@ -137,45 +156,53 @@ void ChatService::reg(const muduo::net::TcpConnectionPtr& conn,
     }
 }
 
-void ChatService::oneChat(const muduo::net::TcpConnectionPtr& conn,
-                           nlohmann::json& js, muduo::Timestamp receiveTime) {
+void ChatService::oneChat(const muduo::net::TcpConnectionPtr &conn,
+                          nlohmann::json &js, muduo::Timestamp receiveTime)
+{
     int toid = js["toid"];
     js["sendtime"] = receiveTime.toFormattedString();
 
     {
         std::lock_guard<std::mutex> lock(connMutex);
         auto iter = _userConnMap.find(toid);
-        if (iter != _userConnMap.end()) {
+        if (iter != _userConnMap.end())
+        {
             sendFramed(iter->second, js.dump());
             return;
         }
     }
 
     User user = _userModel.queryById(toid);
-    if (user.getState() == "online") {
-        if (!_redis.publish(toid, js.dump())) {
+    if (user.getState() == "online")
+    {
+        if (!_redis.publish(toid, js.dump()))
+        {
             LOG_ERROR << "redis publish failed, degrade to offline message";
-            _offlineMsgModel.insert(toid,  js.dump());
+            _offlineMsgModel.insert(toid, js.dump());
         }
-    }else{
+    }
+    else
+    {
         _offlineMsgModel.insert(toid, js.dump());
     }
-
-  
 }
 
-MsgHandler ChatService::getHandler(int msgId) {
+MsgHandler ChatService::getHandler(int msgId)
+{
     auto iter = msgHandlerMap.find(msgId);
-    if (iter == msgHandlerMap.end()) {
-        return [=](const muduo::net::TcpConnectionPtr& conn,
-                    nlohmann::json& js, muduo::Timestamp) {
+    if (iter == msgHandlerMap.end())
+    {
+        return [=](const muduo::net::TcpConnectionPtr &conn,
+                   nlohmann::json &js, muduo::Timestamp)
+        {
             LOG_ERROR << "msgId: " << msgId << " can't find handler";
         };
     }
     return iter->second;
 }
 
-ChatService::ChatService() {
+ChatService::ChatService()
+{
     msgHandlerMap.insert({LOGIN_MSG, std::bind(&ChatService::login, this, _1, _2, _3)});
     msgHandlerMap.insert({REG_MSG, std::bind(&ChatService::reg, this, _1, _2, _3)});
     msgHandlerMap.insert({ONE_CHAT_MSG, std::bind(&ChatService::oneChat, this, _1, _2, _3)});
@@ -184,19 +211,23 @@ ChatService::ChatService() {
     msgHandlerMap.insert({ADD_GROUP_MSG, std::bind(&ChatService::addGroup, this, _1, _2, _3)});
     msgHandlerMap.insert({GROUP_CHAT_MSG, std::bind(&ChatService::groupChat, this, _1, _2, _3)});
     msgHandlerMap.insert({LOGIN_OUT_MSG, std::bind(&ChatService::loginout, this, _1, _2, _3)});
-    msgHandlerMap.insert({PING_MSG,std::bind(&ChatService::heartbeat,this,_1,_2,_3)});
+    msgHandlerMap.insert({PING_MSG, std::bind(&ChatService::heartbeat, this, _1, _2, _3)});
 
-    if (_redis.connect()) {
+    if (_redis.connect())
+    {
         _redis.init_notify_handler(
             std::bind(&ChatService::redisSubscribeMessage, this, _1, _2));
+        _redisPublishThread = std::thread(&ChatService::redisPublishLoop, this);
     }
 }
 
-void ChatService::redisSubscribeMessage(int userid, std::string msg) {
+void ChatService::redisSubscribeMessage(int userid, std::string msg)
+{
     {
         std::lock_guard<std::mutex> lock(connMutex);
         auto iter = _userConnMap.find(userid);
-        if (iter != _userConnMap.end()) {
+        if (iter != _userConnMap.end())
+        {
             sendFramed(iter->second, msg);
             return;
         }
@@ -204,13 +235,14 @@ void ChatService::redisSubscribeMessage(int userid, std::string msg) {
     _offlineMsgModel.insert(userid, msg);
 }
 
-void ChatService::loginout(const muduo::net::TcpConnectionPtr& conn,
-                            nlohmann::json& js, muduo::Timestamp) {
+void ChatService::loginout(const muduo::net::TcpConnectionPtr &conn,
+                           nlohmann::json &js, muduo::Timestamp)
+{
     int id = js["id"];
     {
         std::lock_guard<std::mutex> lock(connMutex);
-            _userConnMap.erase(id);
-            _lastActiveMap.erase(id);
+        _userConnMap.erase(id);
+        _lastActiveMap.erase(id);
     }
     _redis.unsubscribe(id);
     User user;
@@ -220,12 +252,15 @@ void ChatService::loginout(const muduo::net::TcpConnectionPtr& conn,
     LOG_INFO << "id: " << id << " logged out";
 }
 
-void ChatService::clientConnectException(const muduo::net::TcpConnectionPtr& conn) {
+void ChatService::clientConnectException(const muduo::net::TcpConnectionPtr &conn)
+{
     int id = -1;
     {
         std::lock_guard<std::mutex> lock(connMutex);
-        for (auto iter = _userConnMap.begin(); iter != _userConnMap.end(); ++iter) {
-            if (iter->second == conn) {
+        for (auto iter = _userConnMap.begin(); iter != _userConnMap.end(); ++iter)
+        {
+            if (iter->second == conn)
+            {
                 id = iter->first;
                 _userConnMap.erase(iter);
                 _lastActiveMap.erase(id);
@@ -234,38 +269,45 @@ void ChatService::clientConnectException(const muduo::net::TcpConnectionPtr& con
             }
         }
     }
-    if (id != -1) {
-        setUserOffline(id,"disconnect");
+    if (id != -1)
+    {
+        setUserOffline(id, "disconnect");
     }
 }
 
-bool ChatService::reset() {
+bool ChatService::reset()
+{
     return _userModel.stateReset();
 }
 
-void ChatService::addFriend(const muduo::net::TcpConnectionPtr& conn,
-                             nlohmann::json& js, muduo::Timestamp) {
+void ChatService::addFriend(const muduo::net::TcpConnectionPtr &conn,
+                            nlohmann::json &js, muduo::Timestamp)
+{
     int friendId = js["friendId"];
     int userId = js["id"];
 
     nlohmann::json response;
     response["msgId"] = ADD_FRIEND_MSG_ACK;
 
-    if (_friendModel.insert(userId, friendId)) {
+    if (_friendModel.insert(userId, friendId))
+    {
         User friendUser = _userModel.queryById(friendId);
         response["errno"] = 0;
         response["friendId"] = friendId;
         response["friendName"] = friendUser.getName();
         response["friendState"] = friendUser.getState();
-    } else {
+    }
+    else
+    {
         response["errno"] = 1;
         response["errMessage"] = "failed to add friend";
     }
     sendFramed(conn, response.dump());
 }
 
-void ChatService::createGroup(const muduo::net::TcpConnectionPtr& conn,
-                               nlohmann::json& js, muduo::Timestamp) {
+void ChatService::createGroup(const muduo::net::TcpConnectionPtr &conn,
+                              nlohmann::json &js, muduo::Timestamp)
+{
     int userId = js["id"];
     std::string groupname = js["groupname"];
     std::string groupdesc = js["groupdesc"];
@@ -274,7 +316,8 @@ void ChatService::createGroup(const muduo::net::TcpConnectionPtr& conn,
     nlohmann::json response;
     response["msgId"] = CREATE_GROUP_MSG_ACK;
 
-    if (_groupModel.createGroup(group)) {
+    if (_groupModel.createGroup(group))
+    {
         _groupModel.addGroup(userId, group.getId(), "creator");
         User creator = _userModel.queryById(userId);
         response["errno"] = 0;
@@ -289,19 +332,22 @@ void ChatService::createGroup(const muduo::net::TcpConnectionPtr& conn,
         m["state"] = "online";
         membersArr.push_back(m);
         response["members"] = membersArr;
-    } else {
+    }
+    else
+    {
         response["errno"] = 1;
         response["errMessage"] = "failed to create group";
     }
     sendFramed(conn, response.dump());
 }
 
-void ChatService::addGroup(const muduo::net::TcpConnectionPtr& conn,
-                            nlohmann::json& js, muduo::Timestamp) {
+void ChatService::addGroup(const muduo::net::TcpConnectionPtr &conn,
+                           nlohmann::json &js, muduo::Timestamp)
+{
     int userId = js["id"];
     int groupId = js["groupId"];
     _groupModel.addGroup(userId, groupId, "normal");
-
+    invalidateGroupUsersCache(groupId);
     nlohmann::json response;
     response["msgId"] = ADD_GROUP_MSG_ACK;
     response["errno"] = 0;
@@ -309,12 +355,15 @@ void ChatService::addGroup(const muduo::net::TcpConnectionPtr& conn,
 
     // Query updated group info including members
     std::vector<Group> groups = _groupModel.queryGroups(userId);
-    for (auto& g : groups) {
-        if (g.getId() == groupId) {
+    for (auto &g : groups)
+    {
+        if (g.getId() == groupId)
+        {
             response["groupName"] = g.getName();
             response["groupDesc"] = g.getDesc();
             nlohmann::json membersArr = nlohmann::json::array();
-            for (auto& gu : g.getUsers()) {
+            for (auto &gu : g.getUsers())
+            {
                 nlohmann::json m;
                 m["id"] = gu.getId();
                 m["name"] = gu.getName();
@@ -329,46 +378,61 @@ void ChatService::addGroup(const muduo::net::TcpConnectionPtr& conn,
     sendFramed(conn, response.dump());
 }
 
-void ChatService::groupChat(const muduo::net::TcpConnectionPtr& conn,
-                             nlohmann::json& js, muduo::Timestamp) {
+void ChatService::groupChat(const muduo::net::TcpConnectionPtr &conn,
+                            nlohmann::json &js, muduo::Timestamp)
+{
     int userId = js["id"];
     int groupId = js["groupId"];
-    std::vector<int> userVec = _groupModel.queryGroupUsers(userId, groupId);
+    std::vector<int> offlineUsers;
+    std::vector<int> userVec = getGroupUsersCached(groupId);
     std::vector<muduo::net::TcpConnectionPtr> localConns;
     std::vector<int> nonLocalUsers;
 
     {
         std::lock_guard<std::mutex> lock(connMutex);
-        for (int uid : userVec) {
+        for (int uid : userVec)
+        {
+            if (uid == userId)
+                continue;
             auto iter = _userConnMap.find(uid);
-            if (iter != _userConnMap.end()) {
+            if (iter != _userConnMap.end())
+            {
                 localConns.push_back(iter->second);
-            }else{
+            }
+            else
+            {
                 nonLocalUsers.push_back(uid);
             }
         }
     }
 
     std::string msg = js.dump();
-    for(auto& conn:localConns) {
+    for (auto &conn : localConns)
+    {
         sendFramed(conn, msg);
     }
 
-    for(int uid : nonLocalUsers) {
-        User user = _userModel.queryById(uid);
-        if (user.getState() == "online") {
-            if(!_redis.publish(uid, msg)){
-                _offlineMsgModel.insert(uid, msg);
-                LOG_ERROR << "redis publish failed, degrade to offline message";
-            }
-        } else {
-            _offlineMsgModel.insert(uid, msg);
+    auto states = _userModel.queryStatesByIds(nonLocalUsers);
+    for (int uid : nonLocalUsers)
+    {
+        auto it = states.find(uid);
+        bool online = it != states.end() && it->second == "online";
+
+        if (online)
+        {
+            enqueueRedisPublish(uid, msg);
+        }
+        else
+        {
+            offlineUsers.push_back(uid);
         }
     }
+
+    _offlineMsgModel.insertBatch(offlineUsers, msg);
 }
 
-void ChatService::heartbeat(const muduo::net::TcpConnectionPtr& conn,
-                            nlohmann::json& js,
+void ChatService::heartbeat(const muduo::net::TcpConnectionPtr &conn,
+                            nlohmann::json &js,
                             muduo::Timestamp)
 {
     int id = js.value("id", 0);
@@ -377,13 +441,15 @@ void ChatService::heartbeat(const muduo::net::TcpConnectionPtr& conn,
     {
         std::lock_guard<std::mutex> lock(connMutex);
         auto iter = _userConnMap.find(id);
-        if (iter != _userConnMap.end() && iter->second == conn) {
+        if (iter != _userConnMap.end() && iter->second == conn)
+        {
             _lastActiveMap[id] = std::time(nullptr);
             valid = true;
         }
     }
 
-    if (!valid) {
+    if (!valid)
+    {
         conn->shutdown();
         return;
     }
@@ -403,34 +469,40 @@ void ChatService::checkHeartbeatTimeouts()
     {
         std::lock_guard<std::mutex> lock(connMutex);
 
-        for (auto iter = _lastActiveMap.begin(); iter != _lastActiveMap.end();) {
+        for (auto iter = _lastActiveMap.begin(); iter != _lastActiveMap.end();)
+        {
             int id = iter->first;
 
-            if (now - iter->second > HEARTBEAT_TIMEOUT_SECONDS) {
+            if (now - iter->second > HEARTBEAT_TIMEOUT_SECONDS)
+            {
                 auto connIter = _userConnMap.find(id);
-                if (connIter != _userConnMap.end()) {
+                if (connIter != _userConnMap.end())
+                {
                     expired.push_back({id, connIter->second});
                     _userConnMap.erase(connIter);
                 }
                 iter = _lastActiveMap.erase(iter);
-            } else {
+            }
+            else
+            {
                 ++iter;
             }
         }
     }
 
-    for (auto& item : expired) {
+    for (auto &item : expired)
+    {
         int id = item.first;
         auto conn = item.second;
         setUserOffline(id, "heartbeat timeout");
-        conn->getLoop()->runInLoop([conn] {
-            conn->shutdown();
-         });
+        conn->getLoop()->runInLoop([conn]
+                                   { conn->shutdown(); });
     }
 }
-void ChatService::setUserOffline(int id, const std::string& reason)
+void ChatService::setUserOffline(int id, const std::string &reason)
 {
-    if (!_redis.unsubscribe(id)) {
+    if (!_redis.unsubscribe(id))
+    {
         LOG_ERROR << "redis unsubscribe failed, userid=" << id;
     }
 
@@ -441,4 +513,77 @@ void ChatService::setUserOffline(int id, const std::string& reason)
 
     LOG_INFO << "userid=" << id << " offline, reason=" << reason;
 }
-               
+
+std::vector<int> ChatService::getGroupUsersCached(int groupId)
+{
+    {
+        std::shared_lock<std::shared_mutex> lock(_groupUsersCacheMutex);
+        auto it = _groupUsersCache.find(groupId);
+        if (it != _groupUsersCache.end())
+        {
+            return it->second;
+        }
+    }
+
+    std::vector<int> users = _groupModel.queryGroupAllUsers(groupId);
+
+    {
+        std::unique_lock<std::shared_mutex> lock(_groupUsersCacheMutex);
+        _groupUsersCache[groupId] = users;
+    }
+
+    return users;
+}
+
+void ChatService::invalidateGroupUsersCache(int groupId)
+{
+    std::unique_lock<std::shared_mutex> lock(_groupUsersCacheMutex);
+    _groupUsersCache.erase(groupId);
+}
+
+ChatService::~ChatService()
+{
+    _redisPublishRunning = false;
+    _redisPublishCv.notify_all();
+    if (_redisPublishThread.joinable())
+    {
+        _redisPublishThread.join();
+    }
+}
+
+void ChatService::enqueueRedisPublish(int userid, const std::string &message)
+{
+    {
+        std::lock_guard<std::mutex> lock(_redisPublishMutex);
+        _redisPublishQueue.push({userid, message});
+    }
+    _redisPublishCv.notify_one();
+}
+
+void ChatService::redisPublishLoop()
+{
+    while (_redisPublishRunning)
+    {
+        RedisPublishTask task;
+
+        {
+            std::unique_lock<std::mutex> lock(_redisPublishMutex);
+            _redisPublishCv.wait(lock, [this]
+                                 { return !_redisPublishRunning || !_redisPublishQueue.empty(); });
+
+            if (!_redisPublishRunning && _redisPublishQueue.empty())
+            {
+                break;
+            }
+
+            task = std::move(_redisPublishQueue.front());
+            _redisPublishQueue.pop();
+        }
+
+        if (!_redis.publish(task.userid, task.message))
+        {
+            LOG_ERROR << "async redis publish failed, degrade to offline message";
+            _offlineMsgModel.insert(task.userid, task.message);
+        }
+    }
+}

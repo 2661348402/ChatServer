@@ -7,50 +7,50 @@
 #include <mutex>
 #include <ctime>
 #include <vector>
+#include <shared_mutex>
 #include "UserModel.hpp"
 #include "OfflineMessageModel.hpp"
 #include "FriendModel.hpp"
 #include "GroupModel.hpp"
 #include "json.hpp"
 #include "redis.hpp"
+#include <queue>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 
-using MsgHandler = std::function<void(const muduo::net::TcpConnectionPtr& conn,
-                                      nlohmann::json& js, muduo::Timestamp)>;
+using MsgHandler = std::function<void(const muduo::net::TcpConnectionPtr &conn,
+                                      nlohmann::json &js, muduo::Timestamp)>;
 
-class ChatService {
+class ChatService
+{
 public:
-    static ChatService* instance();
+    static ChatService *instance();
 
-    void login(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void reg(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void oneChat(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void addFriend(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void createGroup(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void addGroup(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void groupChat(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
-    void loginout(const muduo::net::TcpConnectionPtr& conn, nlohmann::json& js, muduo::Timestamp);
+    void login(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void reg(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void oneChat(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void addFriend(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void createGroup(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void addGroup(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void groupChat(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
+    void loginout(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
     void redisSubscribeMessage(int channel, std::string message);
-    //添加心跳包
-    void heartbeat(const muduo::net::TcpConnectionPtr& conn,nlohmann::json& js, muduo::Timestamp);
+    // 添加心跳包
+    void heartbeat(const muduo::net::TcpConnectionPtr &conn, nlohmann::json &js, muduo::Timestamp);
     void checkHeartbeatTimeouts();
 
-    void setUserOffline(int id, const std::string& reason);
+    void setUserOffline(int id, const std::string &reason);
     MsgHandler getHandler(int msgId);
-    void clientConnectException(const muduo::net::TcpConnectionPtr& conn);
+    void clientConnectException(const muduo::net::TcpConnectionPtr &conn);
     bool reset();
-   
-
-    static void sendFramed(const muduo::net::TcpConnectionPtr& conn,
-                            const std::string& msg);
-
-
-
-
-
+    ~ChatService();
+    static void sendFramed(const muduo::net::TcpConnectionPtr &conn,
+                           const std::string &msg);
 
 private:
     ChatService();
-    std::unordered_map<int, std::time_t> _lastActiveMap;    
+    std::unordered_map<int, std::time_t> _lastActiveMap;
     static constexpr int HEARTBEAT_TIMEOUT_SECONDS = 90;
     std::unordered_map<int, MsgHandler> msgHandlerMap;
     UserModel _userModel;
@@ -60,6 +60,26 @@ private:
     std::unordered_map<int, muduo::net::TcpConnectionPtr> _userConnMap;
     std::mutex connMutex;
     Redis _redis;
+    std::vector<int> getGroupUsersCached(int groupId);
+    void invalidateGroupUsersCache(int groupId);
+
+    std::unordered_map<int, std::vector<int>> _groupUsersCache;
+    std::shared_mutex _groupUsersCacheMutex;
+
+    struct RedisPublishTask
+    {
+        int userid;
+        std::string message;
+    };
+
+    void enqueueRedisPublish(int userid, const std::string &message);
+    void redisPublishLoop();
+
+    std::queue<RedisPublishTask> _redisPublishQueue;
+    std::mutex _redisPublishMutex;
+    std::condition_variable _redisPublishCv;
+    std::thread _redisPublishThread;
+    std::atomic_bool _redisPublishRunning{true};
 };
 
 #endif

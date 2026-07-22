@@ -183,3 +183,140 @@ heartbeat received, userid=101
 服务端在超时时间后判定用户心跳超时。
 服务端主动关闭连接。
 用户状态被更新为 offline。
+
+### 并发测试: 群聊热路径优化
+
+#### 测试目的
+- 验证群成员缓存、批量用户状态查询、批量离线消息插入和 Redis publish 队列化后，群聊高压场景是否还会严重积压。
+- 对比优化前后在 100 人群聊、8 个发送者、100 QPS 场景下的吞吐、延迟和消息完整性。
+- 验证修正后的压测脚本在多发送者场景下能正确计算期望本地消息数。
+
+#### 测试场景
+
+- `groupId`: 1
+- 群总用户数：100
+- 本机在线用户：60
+- 远端在线用户：20
+- 离线用户：20
+- 发送者数量：8
+- 压测时长：60 秒
+- 目标发送速率：100 QPS
+- 发送完成后等待处理积压：30 秒
+
+#### 测试命令
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 100 \
+  --senders 8 \
+  --drain-time 30
+```
+
+#### 压测脚本修正
+
+多发送者场景下，每条群消息只应该排除当前发送者本人，其他发送者仍然是群成员，也应该收到消息。
+
+因此 `expected local messages` 的计算从：
+
+```python
+args.local_online - len(sender_ids)
+```
+
+修正为：
+
+```python
+args.local_online - 1
+```
+
+以 60 个本机在线用户、6000 条群消息为例，正确期望值为：
+
+```text
+6000 * 59 = 354000
+```
+
+#### 优化前结果
+
+```text
+sent messages: 5999
+received local messages: 100536
+expected local messages: 311948
+throughput: 1675.33 msg/s
+avg latency: 36748.88 ms
+min latency: 1.97 ms
+p95 latency: 69363.04 ms
+p99 latency: 72231.43 ms
+max latency: 72949.16 ms
+parse errors: 0
+disconnects: 0
+messages without timestamp: 0
+missing local messages: 211412
+total errors: 211412
+```
+
+#### 优化后结果
+
+单发送者，100 QPS：
+
+```text
+sent messages: 6000
+received local messages: 354000
+expected local messages: 354000
+throughput: 5899.96 msg/s
+avg latency: 4.24 ms
+min latency: 0.28 ms
+p95 latency: 6.62 ms
+p99 latency: 8.85 ms
+max latency: 113.78 ms
+parse errors: 0
+disconnects: 0
+messages without timestamp: 0
+missing local messages: 0
+total errors: 0
+```
+
+8 个发送者，100 QPS：
+
+```text
+sent messages: 6000
+received local messages: 354000
+expected local messages: 354000
+throughput: 5898.99 msg/s
+avg latency: 11.41 ms
+min latency: 0.28 ms
+p95 latency: 33.23 ms
+p99 latency: 217.68 ms
+max latency: 399.76 ms
+parse errors: 0
+disconnects: 0
+messages without timestamp: 0
+missing local messages: 0
+total errors: 0
+```
+
+#### 优化前后对比
+
+| 场景 | 发送消息数 | 实际本地接收 | 期望本地接收 | 缺失消息 | 吞吐量 | 平均延迟 | P95 | P99 | 错误数 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 优化前，8 发送者，100 QPS | 5999 | 100536 | 311948 | 211412 | 1675.33 msg/s | 36748.88 ms | 69363.04 ms | 72231.43 ms | 211412 |
+| 优化后，8 发送者，100 QPS | 6000 | 354000 | 354000 | 0 | 5898.99 msg/s | 11.41 ms | 33.23 ms | 217.68 ms | 0 |
+| 优化后，1 发送者，100 QPS | 6000 | 354000 | 354000 | 0 | 5899.96 msg/s | 4.24 ms | 6.62 ms | 8.85 ms | 0 |
+
+#### 测试结论
+- 群聊热路径优化后，8 发送者、100 QPS 场景下，本机消息全部送达，缺失消息从 `211412` 降为 `0`。
+- 吞吐量从 `1675.33 msg/s` 提升到 `5898.99 msg/s`，约提升 `3.5x`。
+- 平均延迟从 `36748.88 ms` 降到 `11.41 ms`，长时间排队问题基本消除。
+- P99 延迟从 `72231.43 ms` 降到 `217.68 ms`，长尾延迟明显改善。
+- 单发送者 100 QPS 场景下，P99 为 `8.85 ms`，说明在没有多发送者竞争时群聊路径延迟更稳定。
+- 8 发送者场景仍存在一定长尾抖动，后续可以继续关注本机连接发送循环、连接表锁竞争和 Redis 发布队列积压情况。
+
+#### 优化原因分析
+- 群成员缓存减少了 `GroupUser` 表重复查询。
+- 批量用户状态查询将非本地用户的 N 次 MySQL 查询合并为 1 次。
+- 批量离线消息插入将多次单行写入合并为一次多行插入。
+- Redis publish 队列化避免群聊 worker 被跨节点转发网络 I/O 阻塞。
+- 这些改动共同减少了 `groupChat()` 热路径中的同步阻塞操作，因此吞吐、平均延迟、长尾延迟和消息完整性都有明显改善。

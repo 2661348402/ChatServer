@@ -222,7 +222,7 @@ def print_report(
 
     latencies.sort()
 
-    local_receivers_per_message = max(args.local_online - len(sender_ids), 0)
+    local_receivers_per_message = max(args.local_online - 1, 0)
     expected_local_received = sent * local_receivers_per_message
     missing_local_messages = max(expected_local_received - received, 0)
 
