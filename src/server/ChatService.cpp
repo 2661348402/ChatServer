@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <arpa/inet.h>
+#include "Metrics.hpp"
 
 using namespace std::placeholders;
 
@@ -65,6 +66,7 @@ void ChatService::login(const muduo::net::TcpConnectionPtr &conn,
                 std::lock_guard<std::mutex> lock(connMutex);
                 _userConnMap[user.getId()] = conn;
                 _lastActiveMap[user.getId()] = std::time(nullptr);
+                Metrics::instance().setOnlineUsers(_userConnMap.size());
             }
 
             _redis.subscribe(id);
@@ -161,13 +163,14 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr &conn,
 {
     int toid = js["toid"];
     js["sendtime"] = receiveTime.toFormattedString();
+    std::string msg = js.dump();
 
     {
         std::lock_guard<std::mutex> lock(connMutex);
         auto iter = _userConnMap.find(toid);
         if (iter != _userConnMap.end())
         {
-            sendFramed(iter->second, js.dump());
+            sendFramed(iter->second, msg);
             return;
         }
     }
@@ -175,15 +178,16 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr &conn,
     User user = _userModel.queryById(toid);
     if (user.getState() == "online")
     {
-        if (!_redis.publish(toid, js.dump()))
-        {
-            LOG_ERROR << "redis publish failed, degrade to offline message";
-            _offlineMsgModel.insert(toid, js.dump());
-        }
+
+        enqueueRedisPublish(toid, msg);
     }
     else
     {
-        _offlineMsgModel.insert(toid, js.dump());
+
+        auto offlineBegin = std::chrono::steady_clock::now();
+        _offlineMsgModel.insert(toid, msg);
+        auto offlineEnd = std::chrono::steady_clock::now();
+        Metrics::instance().recordOfflineStore(offlineEnd - offlineBegin, 1);
     }
 }
 
@@ -232,7 +236,10 @@ void ChatService::redisSubscribeMessage(int userid, std::string msg)
             return;
         }
     }
+    auto offlineBegin = std::chrono::steady_clock::now();
     _offlineMsgModel.insert(userid, msg);
+    auto offlineEnd = std::chrono::steady_clock::now();
+    Metrics::instance().recordOfflineStore(offlineEnd - offlineBegin, 1);
 }
 
 void ChatService::loginout(const muduo::net::TcpConnectionPtr &conn,
@@ -243,6 +250,7 @@ void ChatService::loginout(const muduo::net::TcpConnectionPtr &conn,
         std::lock_guard<std::mutex> lock(connMutex);
         _userConnMap.erase(id);
         _lastActiveMap.erase(id);
+        Metrics::instance().setOnlineUsers(_userConnMap.size());
     }
     _redis.unsubscribe(id);
     User user;
@@ -264,6 +272,7 @@ void ChatService::clientConnectException(const muduo::net::TcpConnectionPtr &con
                 id = iter->first;
                 _userConnMap.erase(iter);
                 _lastActiveMap.erase(id);
+                Metrics::instance().setOnlineUsers(_userConnMap.size());
 
                 break;
             }
@@ -381,6 +390,7 @@ void ChatService::addGroup(const muduo::net::TcpConnectionPtr &conn,
 void ChatService::groupChat(const muduo::net::TcpConnectionPtr &conn,
                             nlohmann::json &js, muduo::Timestamp)
 {
+    auto begin = std::chrono::steady_clock::now();
     int userId = js["id"];
     int groupId = js["groupId"];
     std::vector<int> offlineUsers;
@@ -406,11 +416,14 @@ void ChatService::groupChat(const muduo::net::TcpConnectionPtr &conn,
         }
     }
 
+    auto localBegin = std::chrono::steady_clock::now();
     std::string msg = js.dump();
     for (auto &conn : localConns)
     {
         sendFramed(conn, msg);
     }
+    auto localEnd = std::chrono::steady_clock::now();
+    Metrics::instance().recordGroupLocalSend(localEnd - localBegin);
 
     auto states = _userModel.queryStatesByIds(nonLocalUsers);
     for (int uid : nonLocalUsers)
@@ -428,7 +441,18 @@ void ChatService::groupChat(const muduo::net::TcpConnectionPtr &conn,
         }
     }
 
-    _offlineMsgModel.insertBatch(offlineUsers, msg);
+    if (!offlineUsers.empty())
+    {
+        auto offlineBegin = std::chrono::steady_clock::now();
+        _offlineMsgModel.insertBatch(offlineUsers, msg);
+        auto offlineEnd = std::chrono::steady_clock::now();
+
+        Metrics::instance().recordOfflineStore(
+            offlineEnd - offlineBegin,
+            offlineUsers.size());
+    }
+    auto end = std::chrono::steady_clock::now();
+    Metrics::instance().recordGroupChat(end - begin);
 }
 
 void ChatService::heartbeat(const muduo::net::TcpConnectionPtr &conn,
@@ -488,6 +512,11 @@ void ChatService::checkHeartbeatTimeouts()
                 ++iter;
             }
         }
+    }
+
+    if (!expired.empty())
+    {
+        Metrics::instance().setOnlineUsers(_userConnMap.size());
     }
 
     for (auto &item : expired)
@@ -579,11 +608,18 @@ void ChatService::redisPublishLoop()
             task = std::move(_redisPublishQueue.front());
             _redisPublishQueue.pop();
         }
-
-        if (!_redis.publish(task.userid, task.message))
+        auto redisBegin = std::chrono::steady_clock::now();
+        bool ret = _redis.publish(task.userid, task.message);
+        auto redisEnd = std::chrono::steady_clock::now();
+        Metrics::instance().recordRedisPublish(redisEnd - redisBegin, ret);
+        if (!ret)
         {
             LOG_ERROR << "async redis publish failed, degrade to offline message";
+            Metrics::instance().incOfflineDegrade();
+            auto offlineBegin = std::chrono::steady_clock::now();
             _offlineMsgModel.insert(task.userid, task.message);
+            auto offlineEnd = std::chrono::steady_clock::now();
+            Metrics::instance().recordOfflineStore(offlineEnd - offlineBegin, 1);
         }
     }
 }

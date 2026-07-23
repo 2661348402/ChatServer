@@ -320,3 +320,123 @@ total errors: 0
 - 批量离线消息插入将多次单行写入合并为一次多行插入。
 - Redis publish 队列化避免群聊 worker 被跨节点转发网络 I/O 阻塞。
 - 这些改动共同减少了 `groupChat()` 热路径中的同步阻塞操作，因此吞吐、平均延迟、长尾延迟和消息完整性都有明显改善。
+
+### 并发测试: 可观测性指标与群聊瓶颈定位
+
+#### 测试目的
+
+- 验证新增服务端指标是否能正确反映连接数、在线用户数、消息解析数、群聊处理数、Redis 发布数和离线消息落库情况。
+- 通过 `avg_group_us`、`avg_local_send_us`、`avg_redis_us`、`avg_offline_us`、`max_group_us`、`max_offline_us` 定位群聊长尾延迟来源。
+- 对比 100 QPS、200 QPS、500 QPS 下系统吞吐、延迟、消息完整性和服务端处理能力。
+
+#### 指标说明
+
+| 指标 | 含义 |
+| --- | --- |
+| `conn` | 当前 TCP 连接数 |
+| `users` | 当前本节点在线用户数 |
+| `parsed` | 服务端成功解析的 JSON 消息数量 |
+| `parse_errors` | JSON 解析失败数量 |
+| `group_chat` | 已完成处理的群聊消息数量 |
+| `redis_publish` | Redis 跨节点发布次数 |
+| `redis_fail` | Redis 发布失败次数 |
+| `offline_degrade` | Redis 发布失败后降级写入离线消息次数 |
+| `avg_group_us` | 单条群聊消息服务端平均处理耗时 |
+| `avg_local_send_us` | 本机连接发送循环平均耗时 |
+| `avg_redis_us` | 单次 Redis publish 平均耗时 |
+| `avg_offline_us` | 单批离线消息落库平均耗时 |
+| `offline_store_batch` | 离线消息批量落库调用次数 |
+| `offline_store_rows` | 实际写入离线消息行数 |
+| `max_group_us` | 单条群聊消息最大处理耗时 |
+| `max_offline_us` | 单批离线消息最大落库耗时 |
+
+#### 测试场景
+
+- `groupId`: 1
+- 群总用户数：100
+- 本机在线用户：60
+- 远端在线用户：20
+- 离线用户：20
+- 发送者数量：8
+- 压测时长：60 秒
+
+#### 测试命令
+
+100 QPS：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 100 \
+  --senders 8 \
+  --drain-time 30
+```
+
+200 QPS：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 200 \
+  --senders 8 \
+  --drain-time 30
+```
+
+500 QPS：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 500 \
+  --senders 8 \
+  --drain-time 60
+```
+
+#### 客户端压测结果
+
+| QPS | 发送消息数 | 实际本地接收 | 期望本地接收 | 缺失消息 | 吞吐量 | 平均延迟 | P95 | P99 | 最大延迟 | 解析错误 | 断连 | 总错误 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 6000 | 354000 | 354000 | 0 | 5899.95 msg/s | 5.39 ms | 14.74 ms | 33.66 ms | 55.38 ms | 0 | 60 | 60 |
+| 200 | 12000 | 708000 | 708000 | 0 | 11799.73 msg/s | 9.70 ms | 31.00 ms | 58.33 ms | 202.08 ms | 0 | 0 | 0 |
+| 500 | 30000 | 798757 | 1770000 | 971243 | 13312.52 msg/s | 7923.00 ms | 14688.60 ms | 15414.12 ms | 16194.30 ms | 0 | 60 | 971303 |
+
+说明：100 QPS 和 500 QPS 中的 `disconnects=60` 主要来自压测结束时脚本主动关闭 60 个客户端连接，不能直接等同于服务端异常断连。500 QPS 的核心问题是 `missing local messages=971243`。
+
+#### 服务端指标结果
+
+| QPS | parsed | group_chat | redis_publish | redis_fail | offline_degrade | offline_store_batch | offline_store_rows | avg_group_us | avg_local_send_us | avg_redis_us | avg_offline_us | max_group_us | max_offline_us |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 6060 | 6000 | 120000 | 0 | 0 | 6000 | 120000 | 4620 | 154 | 79 | 3357 | 29038 | 27848 |
+| 200 | 12060 | 12000 | 240000 | 0 | 0 | 12000 | 240000 | 3658 | 136 | 71 | 2734 | 88051 | 55474 |
+| 500 | 30060 | 14078 | 281560 | 0 | 0 | 14078 | 281560 | 4190 | 154 | 85 | 3236 | 30558 | 29468 |
+
+#### 结果分析
+
+- 100 QPS 和 200 QPS 场景下，`group_chat` 分别等于发送消息数 `6000` 和 `12000`，说明服务端完成了全部群聊处理。
+- 100 QPS 和 200 QPS 场景下，`redis_publish` 分别等于 `发送消息数 * 20`，`offline_store_rows` 也等于 `发送消息数 * 20`，说明远端在线用户转发和离线用户落库数量符合预期。
+- Redis 发布平均耗时稳定在 `71us` 到 `85us`，且 `redis_fail=0`，说明当前测试下 Redis 不是主要瓶颈。
+- 本机连接发送平均耗时稳定在 `136us` 到 `154us`，说明本机发送循环不是主要瓶颈。
+- 离线消息批量落库平均耗时为 `2.7ms` 到 `3.3ms`，明显高于本机发送和 Redis publish，是 100/200 QPS 场景下群聊热路径中的主要耗时来源。
+- 200 QPS 场景下 `max_group_us=88051`、`max_offline_us=55474`，说明长尾延迟主要来自离线消息落库，但也包含业务线程调度和排队开销。
+- 500 QPS 场景下，`parsed=30060` 说明 IO 线程已经成功收到了 60 条登录消息和 30000 条群聊消息，但 `group_chat=14078`，说明只有约一半群聊任务在压测统计前完成处理。
+- 500 QPS 场景下 `redis_publish=281560` 和 `offline_store_rows=281560`，刚好等于 `14078 * 20`，进一步证明瓶颈不是消息解析，而是业务任务积压后未能全部执行完。
+
+#### 测试结论
+
+- 当前系统在 100 QPS 和 200 QPS、8 个发送者、100 人群聊场景下可以保证本机消息完整投递，且 P99 延迟分别为 `33.66 ms` 和 `58.33 ms`。
+- 500 QPS 已超过当前系统稳定处理能力，出现大量消息未及时送达，平均延迟和 P99 延迟上升到秒级。
+- 可观测性指标能够定位瓶颈位置：IO 线程收包正常，Redis publish 正常，本机发送正常，主要瓶颈集中在业务线程处理能力和离线消息同步落库。
+- 下一步应优先增加业务线程池队列长度、当前积压任务数、最大积压任务数等指标，确认是否存在业务队列堆积或任务丢弃。
+- 性能优化方向应优先考虑将离线消息落库从 `groupChat()` 热路径中拆出，改为异步离线落库队列，由后台线程批量写入 MySQL。

@@ -17,6 +17,7 @@ include_directories(include/server/model)
 include_directories(include/server/redis)
 include_directories(include/server/config)
 include_directories(include/server/util)
+include_directories(include/server/metrics)
 include_directories(include/client)
 include_directories(third_party)
 

@@ -4,7 +4,9 @@
 #include <muduo/base/Logging.h>
 #include <arpa/inet.h>
 #include <cstring>
+#include "Metrics.hpp"
 #include "Config.hpp"
+
 
 ChatServer::ChatServer(muduo::net::EventLoop *loop,
                        const muduo::net::InetAddress &listenAddr,
@@ -23,6 +25,8 @@ ChatServer::ChatServer(muduo::net::EventLoop *loop,
 
     _loop->runEvery(10.0, []
                     { ChatService::instance()->checkHeartbeatTimeouts(); });
+    _loop->runEvery(10.0, []
+                    { Metrics::instance().dump(); });
 
     _server.setThreadNum(Config::instance().getInt("server.threads", 4));
 }
@@ -35,8 +39,14 @@ void ChatServer::start()
 
 void ChatServer::onConnection(const muduo::net::TcpConnectionPtr &conn)
 {
-    if (!conn->connected())
+    if (conn->connected())
     {
+        Metrics::instance().incOnlineConnections();
+    }
+    else
+    {
+        Metrics::instance().decOnlineConnections();
+
         ChatService::instance()->clientConnectException(conn);
         conn->shutdown();
     }
@@ -70,6 +80,7 @@ void ChatServer::onMessage(const muduo::net::TcpConnectionPtr &conn,
         try
         {
             auto js = nlohmann::json::parse(msg);
+            Metrics::instance().incParsedMessages();
             if (!js.contains("msgId"))
                 continue;
 
@@ -96,6 +107,7 @@ void ChatServer::onMessage(const muduo::net::TcpConnectionPtr &conn,
         }
         catch (const std::exception &e)
         {
+            Metrics::instance().incParseErrors();
             LOG_ERROR << "Message parse error: " << e.what();
         }
     }
