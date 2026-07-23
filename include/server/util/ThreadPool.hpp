@@ -10,16 +10,18 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <chrono>
 
-class ThreadPool {
+class ThreadPool
+{
 public:
     using Task = std::function<void()>;
 
     ThreadPool(size_t threadNum, size_t maxQueueSize);
     ~ThreadPool();
 
-    ThreadPool(const ThreadPool&) = delete;
-    ThreadPool& operator=(const ThreadPool&) = delete;
+    ThreadPool(const ThreadPool &) = delete;
+    ThreadPool &operator=(const ThreadPool &) = delete;
 
     void start();
     void stop();
@@ -27,14 +29,21 @@ public:
     bool submit(size_t key, Task task);
 
 private:
-    struct Worker {
+    struct QueuedTask
+    {
+        Task task;
+        std::chrono::steady_clock::time_point enqueueTime;
+    };
+
+    struct Worker
+    {
         std::mutex mutex;
         std::condition_variable cv;
-        std::deque<Task> tasks;
+        std::deque<QueuedTask> tasks;
     };
 
     void runWorker(size_t index);
-
+    std::atomic<std::size_t> _queuedTaskCount{0};
     std::vector<std::unique_ptr<Worker>> _workers;
     std::vector<std::thread> _threads;
     size_t _maxQueueSize;

@@ -55,7 +55,6 @@ void Metrics::recordGroupChat(std::chrono::steady_clock::duration cost)
     _groupChatCount.fetch_add(1);
     _groupChatTotalUs.fetch_add(costUs);
     updateMax(_groupChatMaxUs, costUs);
-    
 }
 
 void Metrics::recordGroupLocalSend(std::chrono::steady_clock::duration cost)
@@ -87,6 +86,34 @@ void Metrics::incOfflineDegrade()
 {
     _offlineDegrade.fetch_add(1);
 }
+
+void Metrics::recordBusinessTaskSubmitted()
+{
+    _businessTaskSubmitted.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Metrics::recordBusinessTaskCompleted()
+{
+    _businessTaskCompleted.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Metrics::recordBusinessTaskRejected()
+{
+    _businessTaskRejected.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Metrics::recordBusinessQueueSize(std::int64_t size)
+{
+    _businessQueueSize.store(size, std::memory_order_relaxed);
+    updateMax(_businessMaxQueueSize, size);
+}
+
+void Metrics::recordBusinessQueueWait(std::int64_t waitUs)
+{
+    _businessQueueWaitCount.fetch_add(1, std::memory_order_relaxed);
+    _businessQueueWaitTotalUs.fetch_add(waitUs, std::memory_order_relaxed);
+    updateMax(_businessQueueWaitMaxUs, waitUs);
+}
 std::string Metrics::snapshot() const
 {
     auto avg = [](std::int64_t total, std::int64_t count)
@@ -98,6 +125,7 @@ std::string Metrics::snapshot() const
     auto localCount = _groupLocalSendCount.load();
     auto redisCount = _redisPublishCount.load();
     auto offlineStoreBatchCount = _offlineStoreBatchCount.load();
+    auto bizWaitCount = _businessQueueWaitCount.load();
 
     std::ostringstream oss;
     oss << "[METRICS]"
@@ -116,7 +144,14 @@ std::string Metrics::snapshot() const
         << " offline_store_batch=" << offlineStoreBatchCount
         << " offline_store_rows=" << _offlineStoreRows.load()
         << " max_group_us=" << _groupChatMaxUs.load()
-        << " max_offline_us=" << _offlineStoreMaxUs.load();
+        << " max_offline_us=" << _offlineStoreMaxUs.load()
+        << " biz_submit=" << _businessTaskSubmitted.load()
+        << " biz_done=" << _businessTaskCompleted.load()
+        << " biz_reject=" << _businessTaskRejected.load()
+        << " biz_queue=" << _businessQueueSize.load()
+        << " biz_max_queue=" << _businessMaxQueueSize.load()
+        << " biz_avg_queue_wait_us=" << avg(_businessQueueWaitTotalUs.load(), bizWaitCount)
+        << " biz_max_queue_wait_us=" << _businessQueueWaitMaxUs.load();
 
     return oss.str();
 }

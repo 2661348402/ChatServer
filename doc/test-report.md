@@ -412,7 +412,7 @@ python3 scripts/group_chat_benchmark.py \
 | 200 | 12000 | 708000 | 708000 | 0 | 11799.73 msg/s | 9.70 ms | 31.00 ms | 58.33 ms | 202.08 ms | 0 | 0 | 0 |
 | 500 | 30000 | 798757 | 1770000 | 971243 | 13312.52 msg/s | 7923.00 ms | 14688.60 ms | 15414.12 ms | 16194.30 ms | 0 | 60 | 971303 |
 
-说明：100 QPS 和 500 QPS 中的 `disconnects=60` 主要来自压测结束时脚本主动关闭 60 个客户端连接，不能直接等同于服务端异常断连。500 QPS 的核心问题是 `missing local messages=971243`。
+说明：压测结果中的 `disconnects=60` 主要来自压测脚本收尾关闭连接，或长 `drain-time` 场景下压测客户端没有发送心跳而被服务端判定为心跳超时，不能直接等同于服务端异常断连。500 QPS 的核心问题是 `missing local messages=971243`。
 
 #### 服务端指标结果
 
@@ -440,3 +440,272 @@ python3 scripts/group_chat_benchmark.py \
 - 可观测性指标能够定位瓶颈位置：IO 线程收包正常，Redis publish 正常，本机发送正常，主要瓶颈集中在业务线程处理能力和离线消息同步落库。
 - 下一步应优先增加业务线程池队列长度、当前积压任务数、最大积压任务数等指标，确认是否存在业务队列堆积或任务丢弃。
 - 性能优化方向应优先考虑将离线消息落库从 `groupChat()` 热路径中拆出，改为异步离线落库队列，由后台线程批量写入 MySQL。
+
+### 并发测试: 业务队列指标与线程池分片修复
+
+#### 测试目的
+
+- 验证业务线程池新增队列指标是否能定位任务积压问题。
+- 确认连接地址直接取模是否会导致 worker 分布不均。
+- 验证修复线程池分片后，业务队列积压、任务拒绝和消息缺失是否改善。
+- 判断目标 500 QPS 场景下瓶颈是在服务端还是压测客户端。
+
+#### 新增指标说明
+
+| 指标 | 含义 |
+| --- | --- |
+| `biz_submit` | 成功提交到业务线程池的任务数量 |
+| `biz_done` | 业务线程实际执行完成的任务数量 |
+| `biz_reject` | 线程池未运行或队列满导致拒绝的任务数量 |
+| `biz_queue` | 当前业务任务积压数量 |
+| `biz_max_queue` | 压测期间业务队列最大积压数量 |
+| `biz_avg_queue_wait_us` | 业务任务从入队到开始执行的平均等待时间 |
+| `biz_max_queue_wait_us` | 业务任务最长排队等待时间 |
+
+#### 问题定位
+
+修复前，线程池使用连接对象地址直接取模：
+
+```cpp
+size_t index = key % _workers.size();
+```
+
+临时 worker 分配日志显示，连接地址受内存对齐影响，低位大多为 0，`worker_count=8` 时任务几乎全部进入 `worker=0`：
+
+```text
+business submit key=100140158470032, worker=0
+business submit key=100140165166496, worker=0
+business submit key=100140165169168, worker=0
+```
+
+因此业务线程池虽然配置了 8 个 worker，但高压群聊时实际接近单 worker 处理。
+
+#### 修复方式
+
+在取模前对连接 key 做位混合：
+
+```cpp
+static size_t mixKey(size_t key)
+{
+    key ^= key >> 33;
+    key *= 0xff51afd7ed558ccdULL;
+    key ^= key >> 33;
+    key *= 0xc4ceb9fe1a85ec53ULL;
+    key ^= key >> 33;
+    return key;
+}
+```
+
+再使用：
+
+```cpp
+size_t index = mixKey(key) % _workers.size();
+```
+
+该方式不改变同一连接固定到同一个 worker 的性质，因此仍能保证单连接内消息顺序。
+
+#### 测试命令
+
+100 QPS、8 发送者：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 100 \
+  --senders 8 \
+  --drain-time 30
+```
+
+目标 500 QPS、8 发送者：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 500 \
+  --senders 8 \
+  --drain-time 60
+```
+
+目标 500 QPS、32 发送者：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --db-user root \
+  --db-password 123456 \
+  --duration 60 \
+  --qps 500 \
+  --senders 32 \
+  --drain-time 60
+```
+
+#### 修复前 500 QPS 结果
+
+客户端结果：
+
+```text
+sent messages: 30000
+received local messages: 610413
+expected local messages: 1770000
+avg latency: 15681.77 ms
+p95 latency: 25637.21 ms
+p99 latency: 25928.24 ms
+missing local messages: 1159587
+```
+
+服务端指标：
+
+```text
+parsed=30060
+group_chat=10346
+biz_submit=30041
+biz_done=30041
+biz_reject=19
+biz_queue=0
+biz_max_queue=10000
+biz_avg_queue_wait_us=8257705
+biz_max_queue_wait_us=25925569
+```
+
+分析：
+
+- `parsed=30060` 表示服务端 IO 层已经解析了 60 条登录消息和约 30000 条群聊消息。
+- `group_chat=10346` 表示实际完成群聊处理的任务远低于发送数。
+- `biz_max_queue=10000` 表示业务队列达到上限。
+- `biz_reject=19` 表示出现任务拒绝，服务端触发连接关闭。
+- `biz_avg_queue_wait_us=8257705` 表示业务任务平均排队约 `8.25s`。
+- 业务线程池分片退化后，高压任务集中到单个 worker，导致业务队列严重积压。
+
+#### 修复后 100 QPS 结果
+
+客户端结果：
+
+```text
+sent messages: 6000
+received local messages: 354000
+expected local messages: 354000
+throughput: 5899.98 msg/s
+avg latency: 5.09 ms
+p95 latency: 13.60 ms
+p99 latency: 33.40 ms
+max latency: 60.51 ms
+parse errors: 0
+disconnects: 0
+missing local messages: 0
+total errors: 0
+```
+
+服务端指标：
+
+```text
+parsed=6060
+group_chat=6000
+redis_publish=120000
+offline_store_rows=120000
+avg_group_us=4152
+avg_local_send_us=160
+avg_redis_us=70
+avg_offline_us=3005
+biz_submit=6060
+biz_done=6060
+biz_reject=0
+biz_queue=0
+biz_max_queue=2
+biz_avg_queue_wait_us=57
+biz_max_queue_wait_us=5541
+```
+
+#### 修复后目标 500 QPS 结果
+
+8 发送者：
+
+```text
+sent messages: 12707
+received local messages: 749713
+expected local messages: 749713
+avg latency: 109.50 ms
+p99 latency: 905.94 ms
+missing local messages: 0
+```
+
+服务端：
+
+```text
+parsed=12767
+group_chat=12707
+biz_submit=12767
+biz_done=12767
+biz_reject=0
+biz_queue=0
+biz_max_queue=220
+biz_avg_queue_wait_us=13716
+```
+
+32 发送者：
+
+```text
+sent messages: 15044
+received local messages: 887596
+expected local messages: 887596
+avg latency: 54.63 ms
+p95 latency: 136.35 ms
+p99 latency: 193.26 ms
+max latency: 385.47 ms
+missing local messages: 0
+```
+
+服务端：
+
+```text
+parsed=15104
+group_chat=15044
+redis_publish=300880
+offline_store_rows=300880
+avg_group_us=5125
+avg_local_send_us=180
+avg_redis_us=72
+avg_offline_us=4041
+biz_submit=15104
+biz_done=15104
+biz_reject=0
+biz_queue=0
+biz_max_queue=14
+biz_avg_queue_wait_us=1163
+biz_max_queue_wait_us=44210
+```
+
+#### 对比表
+
+| 场景 | 发送者 | 目标 QPS | 实际发送 | 实际本地接收 | 期望本地接收 | 缺失消息 | 平均延迟 | P99 | biz_reject | biz_max_queue | biz_avg_queue_wait_us |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 修复前 | 8 | 500 | 30000 | 610413 | 1770000 | 1159587 | 15681.77 ms | 25928.24 ms | 19 | 10000 | 8257705 |
+| 修复后 | 8 | 100 | 6000 | 354000 | 354000 | 0 | 5.09 ms | 33.40 ms | 0 | 2 | 57 |
+| 修复后 | 8 | 500 | 12707 | 749713 | 749713 | 0 | 109.50 ms | 905.94 ms | 0 | 220 | 13716 |
+| 修复后 | 32 | 500 | 15044 | 887596 | 887596 | 0 | 54.63 ms | 193.26 ms | 0 | 14 | 1163 |
+
+#### 测试结论
+
+- 业务线程池增加队列指标后，可以直接定位业务队列是否积压、是否拒绝任务以及任务排队耗时。
+- 原线程池按连接地址直接取模会因为地址对齐导致 worker 分布严重不均，实际高压下退化成少数 worker 处理。
+- 修复分片后，100 QPS 场景业务队列基本无积压，消息完整送达。
+- 目标 500 QPS 场景下，服务端对实际收到的群聊消息全部完成处理，`missing local messages=0`，`biz_reject=0`。
+- 500 QPS 目标下，Python 压测客户端未能发满理论 `30000` 条消息：
+  - 8 发送者实际发送 `12707` 条，约 `212 QPS`。
+  - 32 发送者实际发送 `15044` 条，约 `251 QPS`。
+- 当前继续评估服务端 500 QPS 上限前，需要先优化压测客户端。可能方向包括：
+  - 发送端与接收端分进程。
+  - 接收端减少 JSON 解析和逐条延迟数组记录。
+  - 延迟统计改为采样或聚合。
+  - 压测客户端补充心跳，避免长 `drain-time` 下被服务端心跳超时关闭。
+  - 使用 C++ 或 Go 实现更低开销的压测客户端。
+
+说明：修复后目标 500 QPS 测试中的 `disconnects=60` 来自压测客户端不发送心跳，`duration + drain-time` 超过服务端 90 秒心跳超时时间后，服务端主动关闭连接；该项不代表群聊消息丢失。

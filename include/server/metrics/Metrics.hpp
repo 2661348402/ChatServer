@@ -24,6 +24,11 @@ public:
     void recordOfflineStore(std::chrono::steady_clock::duration cost, std::size_t row);
 
     void incOfflineDegrade();
+    void recordBusinessTaskSubmitted();
+    void recordBusinessTaskCompleted();
+    void recordBusinessTaskRejected();
+    void recordBusinessQueueSize(std::int64_t size);
+    void recordBusinessQueueWait(std::int64_t waitUs);
 
     std::string snapshot() const;
     void dump() const;
@@ -54,6 +59,15 @@ private:
 
     std::atomic<std::int64_t> _groupChatMaxUs{0};
     std::atomic<std::int64_t> _offlineStoreMaxUs{0};
+
+    std::atomic<std::int64_t> _businessTaskSubmitted{0};
+    std::atomic<std::int64_t> _businessTaskCompleted{0};
+    std::atomic<std::int64_t> _businessTaskRejected{0};
+    std::atomic<std::int64_t> _businessQueueSize{0};
+    std::atomic<std::int64_t> _businessMaxQueueSize{0};
+    std::atomic<std::int64_t> _businessQueueWaitCount{0};
+    std::atomic<std::int64_t> _businessQueueWaitTotalUs{0};
+    std::atomic<std::int64_t> _businessQueueWaitMaxUs{0};
 };
 
 #endif

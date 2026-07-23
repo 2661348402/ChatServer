@@ -478,3 +478,77 @@ Redis 在我的系统里只是实时转发通道，不是可靠存储。Redis �
 当压力提升到 500 QPS 时，IO 线程已经解析了全部 30000 条群聊消息，但服务端实际完成 groupChat 的只有 14078 条，Redis publish 和离线落库行数也刚好等于 14078 * 20。这说明瓶颈不在收包，也不在 Redis，而是业务线程处理不过来，任务发生了积压。下一步优化方向就是增加业务线程池队列指标，并把离线消息写库从群聊热路径拆出去，改成后台异步批量落库。
 ```
 
+## 2026-07-23
+
+### 业务线程池队列指标与分片修复
+
+#### 修改内容
+
+- 为业务线程池补充 `biz_submit`、`biz_done`、`biz_reject`、`biz_queue`、`biz_max_queue`、`biz_avg_queue_wait_us`、`biz_max_queue_wait_us` 指标。
+- 将线程池队列元素从单纯 `Task` 扩展为带入队时间的 `QueuedTask`，用于统计任务从入队到开始执行的排队耗时。
+- 修复业务线程池分片不均问题：原来使用连接对象地址直接 `key % worker_count`，由于地址低位受内存对齐影响，`worker_count=8` 时任务几乎都落到 `worker=0`。
+- 增加 key 混合逻辑，在取模前打散连接地址 bit，使不同连接更均匀分布到多个 worker。
+- 保留同一连接固定进入同一 worker 的语义，保证单连接内消息顺序不乱。
+
+#### 验证结果
+
+修复前，500 QPS、8 发送者场景：
+
+```text
+parsed=30060
+group_chat=10346
+biz_submit=30041
+biz_done=30041
+biz_reject=19
+biz_max_queue=10000
+biz_avg_queue_wait_us=8257705
+biz_max_queue_wait_us=25925569
+missing local messages=1159587
+```
+
+修复后，100 QPS、8 发送者场景：
+
+```text
+sent messages: 6000
+received local messages: 354000
+expected local messages: 354000
+avg latency: 5.09 ms
+p99 latency: 33.40 ms
+missing local messages: 0
+biz_max_queue=2
+biz_avg_queue_wait_us=57
+```
+
+修复后，目标 500 QPS、32 发送者场景中，Python 压测客户端实际只发出 `15044` 条群聊消息，约 `250 QPS`。服务端对已收到消息全部完成处理：
+
+```text
+sent messages: 15044
+received local messages: 887596
+expected local messages: 887596
+missing local messages: 0
+avg latency: 54.63 ms
+p99 latency: 193.26 ms
+group_chat=15044
+biz_reject=0
+biz_max_queue=14
+biz_avg_queue_wait_us=1163
+```
+
+#### 结论
+
+- 业务线程池直接使用连接地址取模会因为内存对齐导致 worker 分布严重不均。
+- 对连接 key 做位混合后，业务任务可以分散到多个 worker，队列积压和排队耗时明显下降。
+- 修复后服务端对实际收到的群聊消息可以完整处理，未再出现业务队列打满和任务拒绝。
+- 当前 500 QPS 目标测试的主要限制转移到 Python 压测客户端，脚本未能打满 `30000` 条发送量；后续需要优化压测脚本或使用更高性能压测客户端继续评估服务端真实上限。
+
+面试：
+```text
+我在补充业务线程池指标后发现，500 QPS 场景下 IO 层已经解析完请求，但业务层 groupChat 完成数明显不足。新增的 biz_queue、biz_max_queue、biz_avg_queue_wait_us 和 biz_reject 指标显示，任务在业务线程池中发生了严重积压，甚至队列被打满。
+
+继续排查时，我临时打印每个任务被提交到哪个 worker，发现所有发送任务几乎都进了 worker=0。原因是线程池原来用连接对象地址直接对 worker 数取模，而连接对象地址通常按 8 或 16 字节对齐，低位基本是 0。当 worker 数是 8 时，key % 8 很容易恒等于 0，导致线程池退化成单 worker。
+
+我修复的方式是在取模前对 key 做一次位混合，把地址高位信息扩散到低位，再对 worker 数取模。这样同一个连接的 key 不变，仍然固定进入同一个 worker，保证单连接消息顺序；不同连接则能更均匀地分散到多个 worker。
+
+修复后，100 QPS 场景下业务队列最大积压只有 2，平均排队等待约几十微秒，消息无缺失。目标 500 QPS 测试中，Python 压测客户端实际只打到约 250 QPS，但服务端对收到的 15044 条群聊全部完成处理，业务队列没有打满，说明之前的核心问题已经从 worker 分片退化中恢复。
+```
+
