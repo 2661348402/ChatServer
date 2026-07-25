@@ -14,7 +14,9 @@ All benchmark users use password: 123456
 """
 
 import argparse
+import csv
 import json
+import os
 import socket
 import struct
 import subprocess
@@ -30,6 +32,7 @@ PASSWORD_HASH = "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c9
 
 LOGIN_MSG = 1
 GROUP_CHAT_MSG = 9
+PING_MSG = 14
 
 
 @dataclass
@@ -39,6 +42,7 @@ class Stats:
     received: int = 0
     parse_errors: int = 0
     disconnects: int = 0
+    send_errors: int = 0
     recv_without_ts: int = 0
     seqs: Set[int] = field(default_factory=set)
 
@@ -63,6 +67,32 @@ class Stats:
     def record_disconnect(self) -> None:
         with self.lock:
             self.disconnects += 1
+
+    def record_send_error(self) -> None:
+        with self.lock:
+            self.send_errors += 1
+
+
+@dataclass
+class BenchmarkSummary:
+    elapsed: float
+    target_qps: float
+    actual_send_qps: float
+    receive_throughput: float
+    sent: int
+    received: int
+    expected_local_received: int
+    missing_local_messages: int
+    avg_ms: float
+    min_ms: float
+    p95_ms: float
+    p99_ms: float
+    max_ms: float
+    parse_errors: int
+    disconnects: int
+    send_errors: int
+    recv_without_ts: int
+    total_errors: int
 
 
 def build_sql(group_id: int, total_users: int, local_online: int, remote_online: int) -> str:
@@ -142,6 +172,11 @@ def send_frame(sock: socket.socket, payload: Dict) -> None:
     sock.sendall(struct.pack("!I", len(body)) + body)
 
 
+def send_frame_locked(sock: socket.socket, lock: threading.Lock, payload: Dict) -> None:
+    with lock:
+        send_frame(sock, payload)
+
+
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     chunks = bytearray()
     while len(chunks) < size:
@@ -206,18 +241,114 @@ def percentile(sorted_values: List[int], pct: int) -> int:
     return sorted_values[index]
 
 
+def start_heartbeat_thread(
+    args: argparse.Namespace,
+    user_sockets: Dict[int, socket.socket],
+    send_locks: Dict[int, threading.Lock],
+    stats: Stats,
+    stop_event: threading.Event,
+) -> Optional[threading.Thread]:
+    if args.heartbeat_interval <= 0:
+        return None
+
+    def heartbeat_loop() -> None:
+        while not stop_event.wait(args.heartbeat_interval):
+            for uid, sock in user_sockets.items():
+                if stop_event.is_set():
+                    return
+                try:
+                    send_frame_locked(sock, send_locks[uid], {"msgId": PING_MSG, "id": uid})
+                except OSError:
+                    stats.record_send_error()
+
+    t = threading.Thread(target=heartbeat_loop, daemon=True)
+    t.start()
+    return t
+
+
+def run_send_phase(
+    args: argparse.Namespace,
+    sender_ids: List[int],
+    sender_sockets: Dict[int, socket.socket],
+    send_locks: Dict[int, threading.Lock],
+    stats: Stats,
+    stop_event: threading.Event,
+) -> tuple[int, float]:
+    total_to_send = max(1, int(args.duration * args.qps))
+    interval = 1.0 / args.qps
+    sender_workers = args.sender_workers or min(args.senders, 8)
+
+    next_seq = 1
+    sent = 0
+    seq_lock = threading.Lock()
+    sent_lock = threading.Lock()
+    start_at = time.monotonic() + 0.1
+
+    def next_message_seq() -> Optional[int]:
+        nonlocal next_seq
+        with seq_lock:
+            if next_seq > total_to_send:
+                return None
+            seq = next_seq
+            next_seq += 1
+            return seq
+
+    def sender_loop() -> None:
+        nonlocal sent
+        while not stop_event.is_set():
+            seq = next_message_seq()
+            if seq is None:
+                return
+
+            scheduled_at = start_at + (seq - 1) * interval
+            wait_seconds = scheduled_at - time.monotonic()
+            if wait_seconds > 0 and stop_event.wait(wait_seconds):
+                return
+
+            sender_id = sender_ids[(seq - 1) % len(sender_ids)]
+            payload = {
+                "msgId": GROUP_CHAT_MSG,
+                "id": sender_id,
+                "groupId": args.group_id,
+                "message": f"benchmark-{seq}",
+                "seq": seq,
+                "send_ts_us": time.monotonic_ns() // 1000,
+            }
+
+            try:
+                send_frame_locked(sender_sockets[sender_id], send_locks[sender_id], payload)
+                with sent_lock:
+                    sent += 1
+            except OSError:
+                stats.record_send_error()
+
+    workers = [
+        threading.Thread(target=sender_loop, daemon=True)
+        for _ in range(sender_workers)
+    ]
+
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    elapsed = max(time.monotonic() - start_at, 0.0)
+    return sent, elapsed
+
+
 def print_report(
     args: argparse.Namespace,
     stats: Stats,
     sent: int,
     elapsed: float,
     sender_ids: List[int],
-) -> None:
+) -> BenchmarkSummary:
     with stats.lock:
         latencies = list(stats.latencies_us)
         received = stats.received
         parse_errors = stats.parse_errors
         disconnects = stats.disconnects
+        send_errors = stats.send_errors
         recv_without_ts = stats.recv_without_ts
 
     latencies.sort()
@@ -227,13 +358,14 @@ def print_report(
     missing_local_messages = max(expected_local_received - received, 0)
 
     throughput = received / elapsed if elapsed > 0 else 0
+    actual_send_qps = sent / elapsed if elapsed > 0 else 0
     avg_ms = (sum(latencies) / len(latencies) / 1000) if latencies else 0
     p95_ms = percentile(latencies, 95) / 1000
     p99_ms = percentile(latencies, 99) / 1000
     min_ms = (latencies[0] / 1000) if latencies else 0
     max_ms = (latencies[-1] / 1000) if latencies else 0
 
-    total_errors = parse_errors + disconnects + recv_without_ts + missing_local_messages
+    total_errors = parse_errors + disconnects + send_errors + recv_without_ts + missing_local_messages
 
     print("\n========== Benchmark Result ==========")
     print(f"duration: {elapsed:.2f} s")
@@ -244,6 +376,7 @@ def print_report(
     print(f"offline users: {args.total_users - args.local_online - args.remote_online}")
     print(f"sender ids: {','.join(str(uid) for uid in sender_ids)}")
     print(f"target send qps: {args.qps:.2f}")
+    print(f"actual send qps: {actual_send_qps:.2f}")
     print(f"sent messages: {sent}")
     print(f"received local messages: {received}")
     print(f"expected local messages: {expected_local_received}")
@@ -255,9 +388,110 @@ def print_report(
     print(f"max latency: {max_ms:.2f} ms")
     print(f"parse errors: {parse_errors}")
     print(f"disconnects: {disconnects}")
+    print(f"send errors: {send_errors}")
     print(f"messages without timestamp: {recv_without_ts}")
     print(f"missing local messages: {missing_local_messages}")
     print(f"total errors: {total_errors}")
+
+    return BenchmarkSummary(
+        elapsed=elapsed,
+        target_qps=args.qps,
+        actual_send_qps=actual_send_qps,
+        receive_throughput=throughput,
+        sent=sent,
+        received=received,
+        expected_local_received=expected_local_received,
+        missing_local_messages=missing_local_messages,
+        avg_ms=avg_ms,
+        min_ms=min_ms,
+        p95_ms=p95_ms,
+        p99_ms=p99_ms,
+        max_ms=max_ms,
+        parse_errors=parse_errors,
+        disconnects=disconnects,
+        send_errors=send_errors,
+        recv_without_ts=recv_without_ts,
+        total_errors=total_errors,
+    )
+
+
+def write_csv_report(
+    args: argparse.Namespace,
+    summary: BenchmarkSummary,
+    sender_ids: List[int],
+) -> None:
+    if not args.csv_out:
+        return
+
+    fieldnames = [
+        "timestamp",
+        "server",
+        "group_id",
+        "total_users",
+        "local_online",
+        "remote_online",
+        "offline_users",
+        "senders",
+        "sender_workers",
+        "sender_ids",
+        "duration_s",
+        "target_qps",
+        "actual_send_qps",
+        "receive_throughput",
+        "sent",
+        "received",
+        "expected_local_received",
+        "missing_local_messages",
+        "avg_latency_ms",
+        "min_latency_ms",
+        "p95_latency_ms",
+        "p99_latency_ms",
+        "max_latency_ms",
+        "parse_errors",
+        "disconnects",
+        "send_errors",
+        "messages_without_timestamp",
+        "total_errors",
+    ]
+
+    row = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "server": f"{args.server_host}:{args.server_port}",
+        "group_id": args.group_id,
+        "total_users": args.total_users,
+        "local_online": args.local_online,
+        "remote_online": args.remote_online,
+        "offline_users": args.total_users - args.local_online - args.remote_online,
+        "senders": args.senders,
+        "sender_workers": args.sender_workers or min(args.senders, 8),
+        "sender_ids": ",".join(str(uid) for uid in sender_ids),
+        "duration_s": f"{summary.elapsed:.6f}",
+        "target_qps": f"{summary.target_qps:.6f}",
+        "actual_send_qps": f"{summary.actual_send_qps:.6f}",
+        "receive_throughput": f"{summary.receive_throughput:.6f}",
+        "sent": summary.sent,
+        "received": summary.received,
+        "expected_local_received": summary.expected_local_received,
+        "missing_local_messages": summary.missing_local_messages,
+        "avg_latency_ms": f"{summary.avg_ms:.6f}",
+        "min_latency_ms": f"{summary.min_ms:.6f}",
+        "p95_latency_ms": f"{summary.p95_ms:.6f}",
+        "p99_latency_ms": f"{summary.p99_ms:.6f}",
+        "max_latency_ms": f"{summary.max_ms:.6f}",
+        "parse_errors": summary.parse_errors,
+        "disconnects": summary.disconnects,
+        "send_errors": summary.send_errors,
+        "messages_without_timestamp": summary.recv_without_ts,
+        "total_errors": summary.total_errors,
+    }
+
+    needs_header = not os.path.exists(args.csv_out) or os.path.getsize(args.csv_out) == 0
+    with open(args.csv_out, "a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if needs_header:
+            writer.writeheader()
+        writer.writerow(row)
+    print(f"Wrote CSV result to {args.csv_out}")
 
 
 def run_benchmark(args: argparse.Namespace) -> None:
@@ -275,55 +509,47 @@ def run_benchmark(args: argparse.Namespace) -> None:
     stop_event = threading.Event()
     sockets: List[socket.socket] = []
     readers: List[threading.Thread] = []
+    user_sockets: Dict[int, socket.socket] = {}
+    send_locks: Dict[int, threading.Lock] = {}
 
     print(f"Logging in users 1-{args.local_online} to {args.server_host}:{args.server_port}...")
     try:
         for uid in range(1, args.local_online + 1):
             sock = login_user(args, uid)
             sockets.append(sock)
+            user_sockets[uid] = sock
+            send_locks[uid] = threading.Lock()
             t = threading.Thread(target=reader_loop, args=(uid, sock, stats, stop_event), daemon=True)
             t.start()
             readers.append(t)
 
         sender_ids = list(range(1, args.senders + 1))
-        sender_sockets = {uid: sockets[uid - 1] for uid in sender_ids}
+        sender_sockets = {uid: user_sockets[uid] for uid in sender_ids}
+        heartbeat_thread = start_heartbeat_thread(args, user_sockets, send_locks, stats, stop_event)
         print("Warmup...")
         time.sleep(args.warmup)
 
-        interval = 1.0 / args.qps if args.qps > 0 else 0
-        sent = 0
-        next_send_time = time.monotonic()
-        start = time.monotonic()
-        end = start + args.duration
-
-        print(f"Running benchmark for {args.duration:.2f}s at {args.qps:.2f} msg/s...")
-        while time.monotonic() < end:
-            now = time.monotonic()
-            if interval > 0 and now < next_send_time:
-                time.sleep(min(next_send_time - now, 0.001))
-                continue
-
-            sender_id = sender_ids[sent % len(sender_ids)]
-            seq = sent + 1
-            payload = {
-                "msgId": GROUP_CHAT_MSG,
-                "id": sender_id,
-                "groupId": args.group_id,
-                "message": f"benchmark-{seq}",
-                "seq": seq,
-                "send_ts_us": time.monotonic_ns() // 1000,
-            }
-            send_frame(sender_sockets[sender_id], payload)
-            sent += 1
-            next_send_time += interval
-
-        elapsed = time.monotonic() - start
+        print(
+            f"Running benchmark for {args.duration:.2f}s at {args.qps:.2f} msg/s "
+            f"with {args.sender_workers or min(args.senders, 8)} sender workers..."
+        )
+        sent, elapsed = run_send_phase(
+            args,
+            sender_ids,
+            sender_sockets,
+            send_locks,
+            stats,
+            stop_event,
+        )
         print(f"Send phase finished. Waiting {args.drain_time:.2f}s for pending messages...")
         time.sleep(args.drain_time)
-        print_report(args, stats, sent, elapsed, sender_ids)
+        summary = print_report(args, stats, sent, elapsed, sender_ids)
+        write_csv_report(args, summary, sender_ids)
 
     finally:
         stop_event.set()
+        if "heartbeat_thread" in locals() and heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
         close_sockets(sockets)
 
 
@@ -341,8 +567,25 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--qps", type=float, default=100.0)
+    parser.add_argument(
+        "--qps-list",
+        help="Comma-separated target QPS values. Example: 100,200,500,800,1000.",
+    )
+    parser.add_argument(
+        "--sender-workers",
+        type=int,
+        default=0,
+        help="Concurrent sending threads. 0 means min(senders, 8).",
+    )
     parser.add_argument("--warmup", type=float, default=2.0)
     parser.add_argument("--drain-time", type=float, default=3.0)
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=30.0,
+        help="Seconds between benchmark client heartbeats. Use 0 to disable.",
+    )
+    parser.add_argument("--csv-out", help="Append benchmark result to this CSV file.")
 
     parser.add_argument("--mysql-bin", default="mysql")
     parser.add_argument("--db-host", default="127.0.0.1")
@@ -361,13 +604,33 @@ def parse_args() -> argparse.Namespace:
         parser.error("senders must be <= local-online")
     if args.qps <= 0:
         parser.error("qps must be positive")
+    if args.qps_list:
+        try:
+            args.qps_values = [float(item.strip()) for item in args.qps_list.split(",") if item.strip()]
+        except ValueError:
+            parser.error("qps-list must contain only numbers")
+        if not args.qps_values:
+            parser.error("qps-list must contain at least one value")
+        if any(value <= 0 for value in args.qps_values):
+            parser.error("qps-list values must be positive")
+    else:
+        args.qps_values = [args.qps]
     if args.duration <= 0:
         parser.error("duration must be positive")
+    if args.sender_workers < 0:
+        parser.error("sender-workers must be >= 0")
+    if args.heartbeat_interval < 0:
+        parser.error("heartbeat-interval must be >= 0")
     return args
 
 
 def main() -> int:
-    run_benchmark(parse_args())
+    args = parse_args()
+    for index, qps in enumerate(args.qps_values, start=1):
+        args.qps = qps
+        if len(args.qps_values) > 1:
+            print(f"\n========== QPS Run {index}/{len(args.qps_values)}: {qps:.2f} ==========")
+        run_benchmark(args)
     return 0
 
 

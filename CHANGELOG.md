@@ -552,3 +552,217 @@ biz_avg_queue_wait_us=1163
 修复后，100 QPS 场景下业务队列最大积压只有 2，平均排队等待约几十微秒，消息无缺失。目标 500 QPS 测试中，Python 压测客户端实际只打到约 250 QPS，但服务端对收到的 15044 条群聊全部完成处理，业务队列没有打满，说明之前的核心问题已经从 worker 分片退化中恢复。
 ```
 
+## 2026-07-24
+
+### 压测客户端增强与 500 QPS 复测
+
+#### 修改内容
+
+- 优化 `scripts/group_chat_benchmark.py` 的发送端限速方式：
+  - 原来由单线程循环发送，容易受 Python 调度和 `sendall()` 阻塞影响。
+  - 修改后由多个发送线程共享全局消息序号。
+  - 每条消息按 `start_time + seq / qps` 计算计划发送时间，保证整体 QPS 稳定。
+- 新增 `--sender-workers` 参数，用于控制并发发送线程数。
+- 为每个 socket 增加发送锁，避免多个线程同时写同一个 TCP 连接导致帧交叉。
+- 为压测客户端补充心跳：
+  - 新增 `--heartbeat-interval` 参数。
+  - 默认每 30 秒发送一次 `PING_MSG`。
+  - 避免长时间 `drain-time` 场景下被服务端心跳检测关闭。
+- 增加 CSV 输出：
+  - 新增 `--csv-out` 参数。
+  - 记录目标 QPS、实际发送 QPS、吞吐、平均延迟、P95、P99、最大延迟、缺失消息、断连数和错误数。
+- 新增 `--qps-list` 参数，用于连续摸底多组 QPS；正式报告仍建议每次只跑一个 QPS。
+
+#### 修改原因
+
+- 业务线程池分片修复后，服务端对实际收到的群聊消息已经可以完整处理。
+- 旧压测客户端在目标 500 QPS 下实际只能发出约 250 QPS，导致无法继续判断服务端真实处理能力。
+- 长 `drain-time` 下压测客户端不发送心跳，会触发服务端心跳超时，造成 `disconnects` 指标干扰。
+- 压测结果需要沉淀到 CSV，方便后续写测试报告和简历数据。
+
+#### 验证结果
+
+测试场景：
+- 100 人群聊。
+- 60 个本机在线用户。
+- 20 个远端在线用户。
+- 20 个离线用户。
+- 32 个发送者。
+- 32 个发送线程。
+- 压测时长 60 秒。
+
+100 QPS：
+
+```text
+actual send qps: 100.02
+sent messages: 6000
+received local messages: 354000
+expected local messages: 354000
+missing local messages: 0
+avg latency: 5.36 ms
+p99 latency: 34.02 ms
+group_chat=6000
+biz_reject=0
+biz_max_queue=9
+```
+
+200 QPS：
+
+```text
+actual send qps: 199.98
+sent messages: 12000
+received local messages: 708000
+expected local messages: 708000
+missing local messages: 0
+avg latency: 14.58 ms
+p99 latency: 104.53 ms
+group_chat=12000
+biz_reject=0
+biz_max_queue=11
+```
+
+500 QPS：
+
+```text
+actual send qps: 500.01
+sent messages: 30000
+received local messages: 1770000
+expected local messages: 1770000
+missing local messages: 0
+avg latency: 46259.66 ms
+p99 latency: 87420.89 ms
+group_chat=30000
+redis_publish=600000
+offline_store_rows=600000
+biz_reject=0
+biz_max_queue=33
+```
+
+#### 结论
+
+- 优化后压测客户端发送端可以稳定打满 500 QPS。
+- 500 QPS、100 人群聊、32 发送者场景下，服务端完成 `30000` 条群聊处理，本机应收 `1770000` 条，实际接收 `1770000` 条，消息缺失为 0。
+- 服务端 `biz_reject=0`，最终 `biz_queue=0`，说明业务线程池没有再出现队列打满或任务拒绝。
+- 500 QPS 下端到端延迟达到几十秒，主要原因是 Python 接收侧需要读取、JSON 解析并统计 `1770000` 条本机转发消息，接收端成为延迟统计瓶颈。
+- 服务端指标显示当前主要同步耗时仍在离线消息落库：`avg_group_us=5691`，`avg_offline_us=4666`，离线落库约占群聊平均处理耗时 82%。
+- 下一步优化重点是将离线消息同步落库改为异步落库队列，由后台线程批量写 MySQL，降低 `groupChat()` 热路径阻塞。
+
+面试：
+```text
+在线程池分片修复后，我继续发现一个问题：目标 500 QPS 下，服务端已经不再打满业务队列，但 Python 压测客户端发送端只能打到约 250 QPS，无法继续评估服务端上限。
+
+我对压测客户端做了增强。发送端不再用单线程 sleep 循环，而是多个发送线程共享全局消息序号，每条消息根据序号计算理论发送时间，这样可以稳定控制整体 QPS。同时给每个 socket 加发送锁，避免多个线程同时写同一个连接造成 TCP 帧交叉。压测客户端还补充了心跳，避免长 drain-time 下被服务端心跳检测关闭，并增加 CSV 输出，方便保留多组测试结果。
+
+复测时，在 100 人群、60 个本机在线、20 个远端在线、20 个离线、32 个发送者、500 QPS、持续 60 秒的场景下，压测客户端实际发送 30000 条群聊消息，服务端 group_chat=30000，Redis publish=600000，离线消息落库 600000 行，本机应收 1770000 条消息，实际全部收到，缺失为 0，业务线程池没有任务拒绝。
+
+这说明服务端在当前场景下可以完成 500 QPS 的群聊处理。客户端统计到的端到端延迟较高，主要是因为 Python 接收侧要读取和解析 177 万条转发消息，接收端成为统计瓶颈。结合服务端指标看，真正值得继续优化的是离线消息同步落库，因为 500 QPS 下 avg_group_us 约 5691us，其中 avg_offline_us 约 4666us，占了大部分。所以下一步我会把离线落库从 groupChat 热路径拆出去，改成后台异步批量写入。
+```
+
+## 2026-07-25
+
+### 异步离线消息落库优化
+
+#### 修改内容
+
+- 新增异步离线消息落库模块，将离线消息写入从 `groupChat()` 热路径中拆出。
+- 群聊业务线程只负责收集离线用户和消息内容，然后投递到异步离线落库队列。
+- 后台落库线程按时间窗口或行数阈值批量 flush 到 MySQL。
+- Redis publish 失败后的降级离线消息也统一进入异步离线落库队列。
+- 服务关闭时通知后台线程退出，并在退出前 flush 队列中剩余任务，避免已入队离线消息丢失。
+- 为 `OfflineMessageModel` 增加多消息批量写入能力，支持一次写入不同用户、不同消息的多行记录。
+- 新增异步落库指标：
+  - `offline_queue`：当前异步离线落库队列长度。
+  - `offline_max_queue`：压测期间最大离线落库队列积压。
+  - `offline_flush_batch`：后台线程 flush 次数。
+  - `offline_flush_rows`：后台线程实际写入离线消息行数。
+  - `offline_avg_flush_us`：后台线程平均 flush 耗时。
+  - `offline_max_flush_us`：后台线程最大 flush 耗时。
+- 清理旧同步落库指标输出，后续主要通过 `offline_flush_*` 和 `offline_queue` 判断异步落库状态。
+
+#### 修改原因
+
+- 500 QPS 复测时，服务端已经能够完整处理 `30000` 条群聊消息，但同步离线落库仍是 `groupChat()` 的主要耗时来源。
+- 优化前服务端指标显示：`avg_group_us=5691`，`avg_offline_us=4666`，离线落库约占群聊平均处理耗时的 82%。
+- 离线消息不在实时在线投递链路上，可以接受几十到上百毫秒级持久化延迟，因此更适合后台批量写入。
+- 将 MySQL 写入从业务线程中拆出后，可以减少业务线程等待数据库的时间，降低高并发群聊热路径耗时。
+
+#### 验证结果
+
+测试场景：
+- 100 人群聊。
+- 60 个本机在线用户。
+- 20 个远端在线用户。
+- 20 个离线用户。
+- 32 个发送者。
+- 16 个发送线程。
+- 压测时长 60 秒。
+
+小流量 10 QPS 验证：
+
+```text
+sent messages: 100
+received local messages: 5900
+expected local messages: 5900
+missing local messages: 0
+total errors: 0
+group_chat=100
+redis_publish=2000
+offline_flush_rows=2000
+offline_queue=0
+```
+
+100 QPS 验证：
+
+```text
+sent messages: 6000
+received local messages: 354000
+expected local messages: 354000
+missing local messages: 0
+total errors: 0
+group_chat=6000
+redis_publish=120000
+offline_flush_rows=120000
+offline_queue=0
+biz_reject=0
+avg_group_us=1357
+```
+
+500 QPS 验证：
+
+```text
+actual send qps: 499.79
+sent messages: 30000
+received local messages: 1770000
+expected local messages: 1770000
+missing local messages: 0
+total errors: 0
+group_chat=30000
+redis_publish=600000
+offline_flush_rows=600000
+offline_queue=0
+offline_max_queue=85
+biz_reject=0
+avg_group_us=1067
+```
+
+#### 优化效果
+
+- 500 QPS 场景下，群聊热路径平均耗时从约 `5691us` 降到 `1067us`，约提升 `5.3x`。
+- 服务端完整处理 `30000` 条群聊消息，本机转发 `1770000 / 1770000` 全部送达，缺失为 `0`。
+- Redis 跨节点投递 `600000` 次，失败为 `0`。
+- 异步离线落库 `600000` 行，最终 `offline_queue=0`，说明队列没有残留积压。
+- 业务线程池 `biz_reject=0`，说明高压下没有任务拒绝。
+- 高扇出场景下客户端端到端延迟仍偏高，主要原因是 Python 接收侧需要读取、解析并统计 `1770000` 条本机转发消息，接收端成为延迟统计瓶颈；服务端指标显示业务处理链路已经无明显积压。
+
+#### 面试
+
+```text
+我在 500 QPS 群聊压测中通过服务端指标定位到一个新的瓶颈：groupChat() 已经能完整处理 30000 条群聊消息，但 avg_group_us 约 5691us，其中 avg_offline_us 约 4666us，离线消息同步落库占了大部分耗时。
+
+离线消息不属于在线实时投递链路，它的目标是保证离线用户后续登录时能拉取到消息，因此可以接受很短的持久化延迟。我把离线消息写入从 groupChat() 热路径中拆出来，设计成异步落库队列。业务线程只负责把离线用户和消息投递到队列，后台线程按时间窗口或行数阈值批量 flush 到 MySQL。Redis publish 失败后的降级消息也统一走这个异步队列。
+
+为了验证这个改动，我补充了 offline_queue、offline_max_queue、offline_flush_batch、offline_flush_rows、offline_avg_flush_us 和 offline_max_flush_us 等指标。500 QPS、100 人群、60 本机在线、20 远端在线、20 离线、32 发送者场景下，服务端完整处理 30000 条群聊消息，本机转发 1770000 条全部收到，Redis publish 600000 次，异步离线落库 600000 行，offline_queue 最终为 0，biz_reject 为 0。
+
+优化后 avg_group_us 从约 5691us 降到 1067us，说明业务线程不再同步等待 MySQL 离线落库，群聊热路径耗时明显下降。端到端延迟仍然较高，主要是 Python 压测客户端接收侧要解析 177 万条消息，接收统计成为瓶颈；从服务端指标看，业务处理和异步落库都已经完成闭环。
+```
+

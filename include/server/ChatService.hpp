@@ -18,6 +18,7 @@
 #include <thread>
 #include <condition_variable>
 #include <atomic>
+#include "AsyncOfflineMessageStore.hpp"
 
 using MsgHandler = std::function<void(const muduo::net::TcpConnectionPtr &conn,
                                       nlohmann::json &js, muduo::Timestamp)>;
@@ -80,6 +81,7 @@ private:
     std::condition_variable _redisPublishCv;
     std::thread _redisPublishThread;
     std::atomic_bool _redisPublishRunning{true};
+    AsyncOfflineMessageStore _asyncOfflineStore;
 };
 
 #endif

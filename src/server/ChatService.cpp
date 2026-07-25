@@ -183,11 +183,7 @@ void ChatService::oneChat(const muduo::net::TcpConnectionPtr &conn,
     }
     else
     {
-
-        auto offlineBegin = std::chrono::steady_clock::now();
-        _offlineMsgModel.insert(toid, msg);
-        auto offlineEnd = std::chrono::steady_clock::now();
-        Metrics::instance().recordOfflineStore(offlineEnd - offlineBegin, 1);
+        _asyncOfflineStore.enqueue(toid, move(msg));
     }
 }
 
@@ -236,10 +232,7 @@ void ChatService::redisSubscribeMessage(int userid, std::string msg)
             return;
         }
     }
-    auto offlineBegin = std::chrono::steady_clock::now();
-    _offlineMsgModel.insert(userid, msg);
-    auto offlineEnd = std::chrono::steady_clock::now();
-    Metrics::instance().recordOfflineStore(offlineEnd - offlineBegin, 1);
+    _asyncOfflineStore.enqueue(userid, move(msg));
 }
 
 void ChatService::loginout(const muduo::net::TcpConnectionPtr &conn,
@@ -443,13 +436,7 @@ void ChatService::groupChat(const muduo::net::TcpConnectionPtr &conn,
 
     if (!offlineUsers.empty())
     {
-        auto offlineBegin = std::chrono::steady_clock::now();
-        _offlineMsgModel.insertBatch(offlineUsers, msg);
-        auto offlineEnd = std::chrono::steady_clock::now();
-
-        Metrics::instance().recordOfflineStore(
-            offlineEnd - offlineBegin,
-            offlineUsers.size());
+        _asyncOfflineStore.enqueueBatch(move(offlineUsers), move(msg));
     }
     auto end = std::chrono::steady_clock::now();
     Metrics::instance().recordGroupChat(end - begin);
@@ -615,11 +602,7 @@ void ChatService::redisPublishLoop()
         if (!ret)
         {
             LOG_ERROR << "async redis publish failed, degrade to offline message";
-            Metrics::instance().incOfflineDegrade();
-            auto offlineBegin = std::chrono::steady_clock::now();
-            _offlineMsgModel.insert(task.userid, task.message);
-            auto offlineEnd = std::chrono::steady_clock::now();
-            Metrics::instance().recordOfflineStore(offlineEnd - offlineBegin, 1);
+            _asyncOfflineStore.enqueue(task.userid, move(task.message));
         }
     }
 }

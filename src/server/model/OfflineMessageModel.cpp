@@ -64,3 +64,27 @@ bool OfflineMsgModel::insertBatch(const std::vector<int> &userids,
 
     return db->update(sql);
 }
+
+bool OfflineMsgModel::insertRows(const std::vector<OfflineMessageRow> &rows)
+{
+    if (rows.empty())
+    {
+        return true;
+    }
+
+    auto db = ConnectionPool::instance().getConnection();
+
+    std::string sql = "insert into OfflineMessage(userid, message) values";
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        if (i > 0)
+        {
+            sql += ",";
+        }
+
+        std::string escapedMessage = db->escape(rows[i].message);
+        sql += "(" + std::to_string(rows[i].userid) + "," + escapedMessage + ")";
+    }
+
+    return db->update(sql);
+}

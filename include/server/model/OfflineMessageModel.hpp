@@ -4,12 +4,21 @@
 #include <vector>
 #include <string>
 
-class OfflineMsgModel {
+struct OfflineMessageRow
+{
+    int userid;
+    std::string message;
+};
+
+class OfflineMsgModel
+{
 public:
-    bool insert(int userid, const std::string& message);
-    bool insertBatch(const std::vector<int>& userids, const std::string& message);
+    bool insert(int userid, const std::string &message);
+    bool insertBatch(const std::vector<int> &userids, const std::string &message);
     std::vector<std::string> query(int userid);
     bool remove(int userid);
+
+    bool insertRows(const std::vector<OfflineMessageRow> &rows);
 };
 
 #endif

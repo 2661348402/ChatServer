@@ -1,6 +1,8 @@
 #include "Metrics.hpp"
 #include <muduo/base/Logging.h>
 #include <sstream>
+#include <Config.hpp>
+#include <fstream>
 
 Metrics &Metrics::instance()
 {
@@ -73,19 +75,6 @@ void Metrics::recordRedisPublish(std::chrono::steady_clock::duration cost, bool 
     }
 }
 
-void Metrics::recordOfflineStore(std::chrono::steady_clock::duration cost, std::size_t rows)
-{
-    auto costUs = toUs(cost);
-    _offlineStoreBatchCount.fetch_add(1);
-    _offlineStoreRows.fetch_add(static_cast<std::int64_t>(rows));
-    _offlineStoreTotalUs.fetch_add(costUs);
-    updateMax(_offlineStoreMaxUs, costUs);
-}
-
-void Metrics::incOfflineDegrade()
-{
-    _offlineDegrade.fetch_add(1);
-}
 
 void Metrics::recordBusinessTaskSubmitted()
 {
@@ -114,6 +103,24 @@ void Metrics::recordBusinessQueueWait(std::int64_t waitUs)
     _businessQueueWaitTotalUs.fetch_add(waitUs, std::memory_order_relaxed);
     updateMax(_businessQueueWaitMaxUs, waitUs);
 }
+void Metrics::recordOfflineQueueSize(std::int64_t size)
+{
+    _offlineQueueSize.store(size, std::memory_order_relaxed);
+    updateMax(_offlineMaxQueueSize, size);
+}
+
+void Metrics::recordOfflineFlush(std::chrono::steady_clock::duration cost,
+                                 std::size_t rows)
+{
+    auto costUs = toUs(cost);
+
+    _offlineFlushCount.fetch_add(1, std::memory_order_relaxed);
+    _offlineFlushRows.fetch_add(static_cast<std::int64_t>(rows),
+                                std::memory_order_relaxed);
+    _offlineFlushTotalUs.fetch_add(costUs, std::memory_order_relaxed);
+    updateMax(_offlineFlushMaxUs, costUs);
+}
+
 std::string Metrics::snapshot() const
 {
     auto avg = [](std::int64_t total, std::int64_t count)
@@ -124,8 +131,8 @@ std::string Metrics::snapshot() const
     auto groupCount = _groupChatCount.load();
     auto localCount = _groupLocalSendCount.load();
     auto redisCount = _redisPublishCount.load();
-    auto offlineStoreBatchCount = _offlineStoreBatchCount.load();
     auto bizWaitCount = _businessQueueWaitCount.load();
+    auto offlineFlushCount = _offlineFlushCount.load();
 
     std::ostringstream oss;
     oss << "[METRICS]"
@@ -136,27 +143,44 @@ std::string Metrics::snapshot() const
         << " group_chat=" << groupCount
         << " redis_publish=" << redisCount
         << " redis_fail=" << _redisPublishFailed.load()
-        << " offline_degrade=" << _offlineDegrade.load()
         << " avg_group_us=" << avg(_groupChatTotalUs.load(), groupCount)
         << " avg_local_send_us=" << avg(_groupLocalSendTotalUs.load(), localCount)
         << " avg_redis_us=" << avg(_redisPublishTotalUs.load(), redisCount)
-        << " avg_offline_us=" << avg(_offlineStoreTotalUs.load(), offlineStoreBatchCount)
-        << " offline_store_batch=" << offlineStoreBatchCount
-        << " offline_store_rows=" << _offlineStoreRows.load()
         << " max_group_us=" << _groupChatMaxUs.load()
-        << " max_offline_us=" << _offlineStoreMaxUs.load()
         << " biz_submit=" << _businessTaskSubmitted.load()
         << " biz_done=" << _businessTaskCompleted.load()
         << " biz_reject=" << _businessTaskRejected.load()
         << " biz_queue=" << _businessQueueSize.load()
         << " biz_max_queue=" << _businessMaxQueueSize.load()
         << " biz_avg_queue_wait_us=" << avg(_businessQueueWaitTotalUs.load(), bizWaitCount)
-        << " biz_max_queue_wait_us=" << _businessQueueWaitMaxUs.load();
+        << " biz_max_queue_wait_us=" << _businessQueueWaitMaxUs.load()
+        << " offline_queue=" << _offlineQueueSize.load()
+        << " offline_max_queue=" << _offlineMaxQueueSize.load()
+        << " offline_flush_batch=" << offlineFlushCount
+        << " offline_flush_rows=" << _offlineFlushRows.load()
+        << " offline_avg_flush_us=" << avg(_offlineFlushTotalUs.load(), offlineFlushCount)
+        << " offline_max_flush_us=" << _offlineFlushMaxUs.load();
 
     return oss.str();
 }
 
 void Metrics::dump() const
 {
-    LOG_INFO << snapshot();
+    std::string line = snapshot();
+    std::string filePath = Config::instance().get("metrics.file", "");
+
+    if (filePath.empty())
+    {
+        LOG_INFO << line;
+        return;
+    }
+
+    std::ofstream out(filePath, std::ios::app);
+    if (!out.is_open())
+    {
+        LOG_ERROR << "failed to open metrics file: " << filePath;
+        return;
+    }
+
+    out << line << std::endl;
 }

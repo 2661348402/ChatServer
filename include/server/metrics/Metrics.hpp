@@ -21,14 +21,14 @@ public:
     void recordGroupChat(std::chrono::steady_clock::duration cost);
     void recordGroupLocalSend(std::chrono::steady_clock::duration cost);
     void recordRedisPublish(std::chrono::steady_clock::duration cost, bool ok);
-    void recordOfflineStore(std::chrono::steady_clock::duration cost, std::size_t row);
 
-    void incOfflineDegrade();
     void recordBusinessTaskSubmitted();
     void recordBusinessTaskCompleted();
     void recordBusinessTaskRejected();
     void recordBusinessQueueSize(std::int64_t size);
     void recordBusinessQueueWait(std::int64_t waitUs);
+    void recordOfflineQueueSize(std::int64_t size);
+    void recordOfflineFlush(std::chrono::steady_clock::duration cost, std::size_t rows);
 
     std::string snapshot() const;
     void dump() const;
@@ -52,13 +52,15 @@ private:
     std::atomic<std::int64_t> _redisPublishTotalUs{0};
     std::atomic<std::int64_t> _redisPublishFailed{0};
 
-    std::atomic<std::int64_t> _offlineStoreBatchCount{0}; // 落库批次数
-    std::atomic<std::int64_t> _offlineStoreRows{0};       // 实际插入行数
-    std::atomic<std::int64_t> _offlineStoreTotalUs{0};
-    std::atomic<std::int64_t> _offlineDegrade{0};
+    std::atomic<std::int64_t> _offlineQueueSize{0};
+    std::atomic<std::int64_t> _offlineMaxQueueSize{0};
+
+    std::atomic<std::int64_t> _offlineFlushCount{0};
+    std::atomic<std::int64_t> _offlineFlushRows{0};
+    std::atomic<std::int64_t> _offlineFlushTotalUs{0};
+    std::atomic<std::int64_t> _offlineFlushMaxUs{0};
 
     std::atomic<std::int64_t> _groupChatMaxUs{0};
-    std::atomic<std::int64_t> _offlineStoreMaxUs{0};
 
     std::atomic<std::int64_t> _businessTaskSubmitted{0};
     std::atomic<std::int64_t> _businessTaskCompleted{0};

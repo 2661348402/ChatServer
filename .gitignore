@@ -12,3 +12,5 @@ third_party/nginx-*/
 third_party/muduo-*/
 third_party/hiredis-*/
 
+git_backup.sh
+metrics-server1.log

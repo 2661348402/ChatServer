@@ -709,3 +709,259 @@ biz_max_queue_wait_us=44210
   - 使用 C++ 或 Go 实现更低开销的压测客户端。
 
 说明：修复后目标 500 QPS 测试中的 `disconnects=60` 来自压测客户端不发送心跳，`duration + drain-time` 超过服务端 90 秒心跳超时时间后，服务端主动关闭连接；该项不代表群聊消息丢失。
+
+### 并发测试: 压测客户端优化与 500 QPS 复测
+
+#### 测试目的
+
+- 修复 Python 压测客户端在高 QPS 下发送不准的问题。
+- 为压测客户端补充心跳，避免长时间 `drain-time` 下被服务端心跳检测关闭。
+- 支持 CSV 输出，便于多组压测数据沉淀和对比。
+- 在 100 人群聊、32 个发送者场景下重新评估 100/200/500 QPS。
+
+#### 压测脚本优化
+
+- 发送端从单线程定时发送改为多个发送线程共享全局发送序号。
+- 按 `start_time + seq / qps` 计算每条消息的计划发送时间，保证整体限速稳定。
+- 新增 `--sender-workers` 参数，提高高 QPS 下的发送并发能力。
+- 为每个 socket 增加发送锁，避免群聊消息和心跳同时写同一个连接造成帧交叉。
+- 新增 `--heartbeat-interval` 参数，默认每 30 秒发送一次 `PING_MSG`。
+- 新增 `--csv-out` 参数，将 QPS、延迟、缺失消息、断连数等结果追加写入 CSV。
+- 新增 `--qps-list` 参数，可用于快速连续摸底；正式报告建议每次只跑一个 QPS，避免上一轮积压影响下一轮。
+
+#### 测试场景
+
+- `groupId`: 1
+- 群总用户数：100
+- 本机在线用户：60
+- 远端在线用户：20
+- 离线用户：20
+- 发送者数量：32
+- 发送线程数：32
+- 压测时长：60 秒
+- 服务端端口：6001
+
+#### 测试命令
+
+100 QPS：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --senders 32 \
+  --sender-workers 32 \
+  --duration 60 \
+  --drain-time 30 \
+  --qps 100
+```
+
+200 QPS：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --senders 32 \
+  --sender-workers 32 \
+  --duration 60 \
+  --drain-time 30 \
+  --qps 200
+```
+
+500 QPS：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --senders 32 \
+  --sender-workers 32 \
+  --duration 60 \
+  --drain-time 120 \
+  --qps 500
+```
+
+#### 客户端压测结果
+
+| QPS | 目标 QPS | 实际发送 QPS | 发送消息数 | 实际本地接收 | 期望本地接收 | 缺失消息 | 吞吐量 | 平均延迟 | P95 | P99 | 最大延迟 | 错误数 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 100.00 | 100.02 | 6000 | 354000 | 354000 | 0 | 5900.92 msg/s | 5.36 ms | 15.19 ms | 34.02 ms | 109.42 ms | 0 |
+| 200 | 200.00 | 199.98 | 12000 | 708000 | 708000 | 0 | 11798.85 msg/s | 14.58 ms | 42.82 ms | 104.53 ms | 378.25 ms | 0 |
+| 500 | 500.00 | 500.01 | 30000 | 1770000 | 1770000 | 0 | 29500.71 msg/s | 46259.66 ms | 84111.02 ms | 87420.89 ms | 88574.78 ms | 0 |
+
+#### 服务端指标结果
+
+| QPS | parsed | group_chat | redis_publish | redis_fail | offline_store_batch | offline_store_rows | avg_group_us | avg_local_send_us | avg_redis_us | avg_offline_us | max_group_us | max_offline_us | biz_reject | biz_max_queue | biz_avg_queue_wait_us |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 6240 | 6000 | 120000 | 0 | 6000 | 120000 | 4674 | 142 | 73 | 3492 | 30870 | 29061 | 0 | 9 | 96 |
+| 200 | 12240 | 12000 | 240000 | 0 | 12000 | 240000 | 4467 | 146 | 72 | 3455 | 31875 | 30586 | 0 | 11 | 249 |
+| 500 | 30420 | 30000 | 600000 | 0 | 30000 | 600000 | 5691 | 179 | 67 | 4666 | 87142 | 85428 | 0 | 33 | 2306 |
+
+#### 结果分析
+
+- 优化后压测客户端可以稳定打满目标发送速率，500 QPS 场景实际发送 `30000` 条群聊消息。
+- 100/200/500 QPS 场景下，本机接收消息均等于期望值，`missing local messages=0`，说明消息完整性通过。
+- 服务端 `group_chat` 与发送消息数完全一致，`biz_reject=0`，最终 `biz_queue=0`，说明服务端对已收到的群聊任务全部完成处理。
+- 500 QPS 下服务端完成 `600000` 次 Redis publish 和 `600000` 行离线消息落库，Redis 无失败，离线消息落库数量符合预期。
+- 500 QPS 下客户端平均延迟和 P99 延迟达到几十秒，但服务端业务队列平均等待仅约 `2.3ms`，说明端到端延迟主要受 Python 接收侧影响：该场景下压测客户端需要读取、解析和统计 `1770000` 条本机转发消息。
+- 服务端指标显示离线消息落库仍是群聊热路径中的主要同步耗时。500 QPS 下 `avg_group_us=5691`，其中 `avg_offline_us=4666`，离线落库约占群聊处理平均耗时的 82%。
+
+#### 测试结论
+
+- 压测脚本优化后，发送端已经可以稳定达到 500 QPS，之前“Python 客户端发送端打不满”的问题已解决。
+- 当前系统在 100 人群、60 本机在线、20 远端在线、20 离线、32 发送者、500 QPS 场景下，可以完成 `30000` 条群聊处理，且本机消息无缺失。
+- 高扇出场景下，Python 接收侧会放大端到端延迟统计，因此后续更高 QPS 的服务端上限评估需要进一步优化接收端统计方式，或使用 C++/Go 压测客户端。
+- 服务端下一步优化重点应放在异步离线消息落库：将 `groupChat()` 中同步 `OfflineMessageModel::insertBatch()` 拆到后台队列，由后台线程批量写入 MySQL，降低业务线程阻塞时间。
+
+### 并发测试: 异步离线消息落库优化
+
+#### 测试目的
+
+- 验证离线消息写入从 `groupChat()` 热路径拆出后，群聊消息是否仍然完整送达。
+- 验证异步离线落库队列是否能最终清空，且 `offline_flush_rows` 与预期离线消息行数一致。
+- 对比异步化前后的 `avg_group_us`，确认业务线程等待 MySQL 的时间是否下降。
+- 观察 500 QPS 高扇出场景下业务线程池、Redis 发布和异步离线落库是否出现积压或任务拒绝。
+
+#### 新增指标说明
+
+| 指标 | 含义 |
+| --- | --- |
+| `offline_queue` | 当前异步离线落库队列长度 |
+| `offline_max_queue` | 压测期间异步离线落库队列最大积压 |
+| `offline_flush_batch` | 后台落库线程执行 flush 的次数 |
+| `offline_flush_rows` | 后台落库线程实际写入 `OfflineMessage` 的总行数 |
+| `offline_avg_flush_us` | 后台线程平均每次 flush 耗时 |
+| `offline_max_flush_us` | 后台线程最大单次 flush 耗时 |
+
+说明：异步化后，旧的同步离线落库指标不再作为主要判断依据。测试重点改为观察 `offline_flush_rows` 是否等于预期行数，以及 `offline_queue` 是否最终回到 `0`。
+
+#### 测试场景
+
+- `groupId`: 1
+- 群总用户数：100
+- 本机在线用户：60
+- 远端在线用户：20
+- 离线用户：20
+- 服务端端口：6001
+- MySQL：`127.0.0.1:3306`
+- Redis：`127.0.0.1:6379`
+
+#### 测试命令
+
+10 QPS 小流量验证：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --qps 10 \
+  --duration 10 \
+  --local-online 60 \
+  --remote-online 20 \
+  --total-users 100 \
+  --senders 8 \
+  --sender-workers 4 \
+  --drain-time 5
+```
+
+100 QPS 验证：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --qps 100 \
+  --duration 60 \
+  --local-online 60 \
+  --remote-online 20 \
+  --total-users 100 \
+  --senders 32 \
+  --sender-workers 8 \
+  --drain-time 10
+```
+
+500 QPS 验证：
+
+```bash
+python3 scripts/group_chat_benchmark.py \
+  --server-host 127.0.0.1 \
+  --server-port 6001 \
+  --qps 500 \
+  --duration 60 \
+  --local-online 60 \
+  --remote-online 20 \
+  --total-users 100 \
+  --senders 32 \
+  --sender-workers 16 \
+  --drain-time 100
+```
+
+MySQL 离线消息行数校验：
+
+```bash
+mysql -h127.0.0.1 -P3306 -uroot -p123456 -Dchat \
+  -e "select count(*) from OfflineMessage where userid between 81 and 100;"
+```
+
+#### 客户端压测结果
+
+| QPS | 实际发送 QPS | 发送消息数 | 实际本地接收 | 期望本地接收 | 缺失消息 | 吞吐量 | 平均延迟 | P95 | P99 | 最大延迟 | 错误数 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 10.10 | 100 | 5900 | 5900 | 0 | 595.90 msg/s | 5.52 ms | 12.19 ms | 30.35 ms | 39.37 ms | 0 |
+| 100 | 100.01 | 6000 | 354000 | 354000 | 0 | 5900.84 msg/s | 5.87 ms | 16.84 ms | 35.87 ms | 221.75 ms | 0 |
+| 500 | 499.79 | 30000 | 1770000 | 1770000 | 0 | 29487.83 msg/s | 31482.95 ms | 55248.41 ms | 57539.29 ms | 59154.74 ms | 0 |
+
+#### 服务端指标结果
+
+| QPS | parsed | group_chat | redis_publish | redis_fail | avg_group_us | avg_local_send_us | avg_redis_us | max_group_us | biz_reject | biz_max_queue | biz_avg_queue_wait_us | offline_queue | offline_max_queue | offline_flush_batch | offline_flush_rows | offline_avg_flush_us | offline_max_flush_us |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 160 | 100 | 2000 | 0 | 1746 | 152 | 145 | 11199 | 0 | 1 | 144 | 0 | 0 | 100 | 2000 | 8325 | 41380 |
+| 100 | 6180 | 6000 | 120000 | 0 | 1357 | 191 | 100 | 47708 | 0 | 5 | 81 | 0 | 0 | 1033 | 120000 | 5865 | 85801 |
+| 500 | 30360 | 30000 | 600000 | 0 | 1067 | 170 | 71 | 53725 | 0 | 8 | 132 | 0 | 85 | 801 | 600000 | 26392 | 145027 |
+
+#### 结果校验
+
+10 QPS：
+
+```text
+发送群聊消息数 = 100
+离线用户数 = 20
+预期离线消息行数 = 100 * 20 = 2000
+实际 offline_flush_rows = 2000
+```
+
+100 QPS：
+
+```text
+发送群聊消息数 = 6000
+离线用户数 = 20
+预期离线消息行数 = 6000 * 20 = 120000
+实际 offline_flush_rows = 120000
+```
+
+500 QPS：
+
+```text
+发送群聊消息数 = 30000
+离线用户数 = 20
+预期离线消息行数 = 30000 * 20 = 600000
+实际 offline_flush_rows = 600000
+```
+
+#### 对比结论
+
+- 异步离线落库后，100/500 QPS 场景下本机消息全部送达，`missing local messages=0`，`total errors=0`。
+- 500 QPS 场景下，服务端完整处理 `30000` 条群聊消息，`group_chat=30000`。
+- 500 QPS 场景下，Redis 跨节点发布 `600000` 次，`redis_fail=0`。
+- 500 QPS 场景下，异步离线落库写入 `600000` 行，`offline_queue=0`，说明后台队列最终清空。
+- 业务线程池没有任务拒绝，`biz_reject=0`，业务队列最大积压为 `8`，平均排队等待约 `132us`。
+- 异步化前 500 QPS 下 `avg_group_us=5691`，异步化后降到 `1067`，约提升 `5.3x`。
+- 500 QPS 端到端延迟仍达到几十秒，主要原因是 Python 压测客户端接收侧需要读取、解析和统计 `1770000` 条本机转发消息；服务端指标显示群聊处理、Redis 发布和异步离线落库都已完成，没有业务队列打满或任务拒绝。
+
+#### 测试结论
+
+- 异步离线消息落库优化通过。
+- 该优化把 MySQL 离线消息写入从群聊业务线程中拆出，降低了 `groupChat()` 热路径平均耗时。
+- 500 QPS、100 人群聊、32 发送者场景下，服务端能够完成 `30000` 条群聊处理，本机转发 `1770000 / 1770000` 全部送达，异步离线落库 `600000` 行，消息缺失为 `0`。
+- 后续如继续评估更高 QPS，应优先优化压测客户端接收侧统计，或使用 C++/Go 压测客户端，避免 Python 接收端成为端到端延迟统计瓶颈。
