@@ -5,11 +5,11 @@
 #include <QVBoxLayout>
 #include <QResizeEvent>
 
-BubbleWidget::BubbleWidget(QWidget* parent)
+BubbleWidget::BubbleWidget(QWidget *parent)
     : QWidget(parent)
 {
-    auto* outerLayout = new QHBoxLayout(this);
-    outerLayout->setContentsMargins(12, 4, 12, 4);
+    auto *outerLayout = new QHBoxLayout(this);
+    outerLayout->setContentsMargins(24, 6, 24, 6);
 
     // Left spacer (used for right-aligned self messages)
     m_leftSpacer = new QWidget(this);
@@ -23,8 +23,8 @@ BubbleWidget::BubbleWidget(QWidget* parent)
     m_bubble = new QFrame(this);
     m_bubble->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
 
-    auto* bubbleLayout = new QVBoxLayout(m_bubble);
-    bubbleLayout->setContentsMargins(12, 8, 12, 6);
+    auto *bubbleLayout = new QVBoxLayout(m_bubble);
+    bubbleLayout->setContentsMargins(12, 9, 12, 9);
     bubbleLayout->setSpacing(4);
 
     // Name label (hidden by default, shown for group chat)
@@ -58,8 +58,8 @@ BubbleWidget::BubbleWidget(QWidget* parent)
     // We'll use the spacers via show/hide in setMessage
 }
 
-void BubbleWidget::setMessage(const QString& name, const QString& text,
-                               const QString& time, bool isSelf, bool showName)
+void BubbleWidget::setMessage(const QString &name, const QString &text,
+                              const QString &time, bool isSelf, bool showName)
 {
     // Set text content
     m_textLabel->setText(text);
@@ -67,40 +67,48 @@ void BubbleWidget::setMessage(const QString& name, const QString& text,
     m_isSelf = isSelf;
 
     // Show/hide name
-    if (showName && !name.isEmpty()) {
+    if (showName && !name.isEmpty())
+    {
         m_nameLabel->setText(name);
         m_nameLabel->show();
-    } else {
+    }
+    else
+    {
         m_nameLabel->hide();
     }
 
     // ---- Style and alignment per sender ----
-    if (isSelf) {
+    if (isSelf)
+    {
         // Right-aligned: show left spacer, hide right spacer
         m_leftSpacer->show();
         m_rightSpacer->hide();
 
         m_bubble->setStyleSheet(
             QString("QFrame {"
-            "  background: %1;"
-            "  border: none;"
-            "  border-radius: 8px;"
-            "}").arg(Theme::bubbleSelf()));
+                    "  background: %1;"
+                    "  border: none;"
+                    "  border-radius: 4px;"
+                    "}")
+                .arg(Theme::bubbleSelf()));
         m_nameLabel->setStyleSheet(
             QString("font-size:11px; color:%1;").arg(Theme::bubbleSelfName()));
         m_timeLabel->setStyleSheet(
             QString("font-size:10px; color:%1;").arg(Theme::bubbleSelfTime()));
-    } else {
+    }
+    else
+    {
         // Left-aligned: hide left spacer, show right spacer
         m_leftSpacer->hide();
         m_rightSpacer->show();
 
         m_bubble->setStyleSheet(
             QString("QFrame {"
-            "  background: %1;"
-            "  border: 1px solid %2;"
-            "  border-radius: 8px;"
-            "}").arg(Theme::bubbleOther(), Theme::borderBubble()));
+                    "  background: %1;"
+                    "  border: 1px solid %2;"
+                    "  border-radius: 8px;"
+                    "}")
+                .arg(Theme::bubbleOther(), Theme::borderBubble()));
         m_nameLabel->setStyleSheet(
             QString("font-size:11px; color:%1;").arg(Theme::textMuted()));
         m_timeLabel->setStyleSheet(
@@ -110,24 +118,29 @@ void BubbleWidget::setMessage(const QString& name, const QString& text,
 
 void BubbleWidget::restyle()
 {
-    if (m_isSelf) {
+    if (m_isSelf)
+    {
         m_bubble->setStyleSheet(
             QString("QFrame {"
-            "  background: %1;"
-            "  border: none;"
-            "  border-radius: 8px;"
-            "}").arg(Theme::bubbleSelf()));
+                    "  background: %1;"
+                    "  border: none;"
+                    "  border-radius: 8px;"
+                    "}")
+                .arg(Theme::bubbleSelf()));
         m_nameLabel->setStyleSheet(
             QString("font-size:11px; color:%1;").arg(Theme::bubbleSelfName()));
         m_timeLabel->setStyleSheet(
             QString("font-size:10px; color:%1;").arg(Theme::bubbleSelfTime()));
-    } else {
+    }
+    else
+    {
         m_bubble->setStyleSheet(
             QString("QFrame {"
-            "  background: %1;"
-            "  border: 1px solid %2;"
-            "  border-radius: 8px;"
-            "}").arg(Theme::bubbleOther(), Theme::borderBubble()));
+                    "  background: %1;"
+                    "  border: 1px solid %2;"
+                    "  border-radius: 8px;"
+                    "}")
+                .arg(Theme::bubbleOther(), Theme::borderBubble()));
         m_nameLabel->setStyleSheet(
             QString("font-size:11px; color:%1;").arg(Theme::textMuted()));
         m_timeLabel->setStyleSheet(
@@ -135,10 +148,10 @@ void BubbleWidget::restyle()
     }
 }
 
-void BubbleWidget::resizeEvent(QResizeEvent* event)
+void BubbleWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     // Bubble max width = 65% of the available chat width, clamped to [180, 480]
-    int newMax = qBound(180, static_cast<int>(width() * 0.65), 480);
+    int newMax = qBound(180, static_cast<int>(width() * 0.60), 520);
     m_bubble->setMaximumWidth(newMax);
 }

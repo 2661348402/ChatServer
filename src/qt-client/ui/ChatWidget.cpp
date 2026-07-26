@@ -8,29 +8,50 @@
 #include <QTimer>
 #include <QFrame>
 
-ChatWidget::ChatWidget(ChatType type, int targetId, const QString& targetName,
-                       ProtocolClient* client, QWidget* parent)
-    : QWidget(parent)
-    , m_chatType(type)
-    , m_targetId(targetId)
-    , m_targetName(targetName)
-    , m_client(client)
+ChatWidget::ChatWidget(ChatType type, int targetId, const QString &targetName,
+                       ProtocolClient *client, QWidget *parent)
+    : QWidget(parent), m_chatType(type), m_targetId(targetId), m_targetName(targetName), m_client(client)
 {
-    auto* mainLayout = new QVBoxLayout(this);
+    auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
+    //--------top title---------------------//
+    auto *titleBar = new QWidget(this);
+    titleBar->setFixedHeight(60);
+    titleBar->setStyleSheet(
+        "background: #F5F5F5;"
+        "border-bottom: 1px solid #E5E5E5;");
+
+    auto *titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(20, 0, 20, 0);
+    titleLayout->setSpacing(8);
+
+    auto *titleLabel = new QLabel(m_targetName, titleBar);
+    titleLabel->setStyleSheet(
+        "font-size: 16px;"
+        "font-weight: 500;"
+        "color: #222222;"
+        "background: transparent;"
+        "border: none;");
+    titleLayout->addWidget(titleLabel);
+    titleLayout->addStretch();
+
+    mainLayout->addWidget(titleBar);
+
     // ---- Group info header (only for group chats) ----
-    if (type == ChatType::Group) {
+    if (type == ChatType::Group)
+    {
         m_groupHeader = new QWidget(this);
-        auto* headerLayout = new QVBoxLayout(m_groupHeader);
+        auto *headerLayout = new QVBoxLayout(m_groupHeader);
         headerLayout->setContentsMargins(8, 4, 8, 4);
 
         m_groupInfoLabel = new QLabel(this);
         m_groupInfoLabel->setWordWrap(true);
         m_groupInfoLabel->setStyleSheet(
             QString("background:%1; padding:6px; border-radius:4px; "
-            "font-size:12px; color:%2;").arg(Theme::groupHeaderBg(), Theme::textPrimary()));
+                    "font-size:12px; color:%2;")
+                .arg(Theme::groupHeaderBg(), Theme::textPrimary()));
         headerLayout->addWidget(m_groupInfoLabel);
 
         m_groupMemberList = new QListWidget(this);
@@ -38,8 +59,8 @@ ChatWidget::ChatWidget(ChatType type, int targetId, const QString& targetName,
         m_groupMemberList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_groupMemberList->setStyleSheet(
             QString("QListWidget { background:%1; font-size:11px; "
-            "border:1px solid %2; }"
-            "QListWidget::item { padding:2px 4px; }")
+                    "border:1px solid %2; }"
+                    "QListWidget::item { padding:2px 4px; }")
                 .arg(Theme::bgInput(), Theme::borderCard()));
         headerLayout->addWidget(m_groupMemberList);
 
@@ -58,51 +79,61 @@ ChatWidget::ChatWidget(ChatType type, int targetId, const QString& targetName,
     m_bubbleLayout = new QVBoxLayout(m_bubbleContainer);
     m_bubbleLayout->setContentsMargins(0, 8, 0, 8);
     m_bubbleLayout->setSpacing(2);
-    m_bubbleLayout->addStretch();   // pushes bubbles upward
+    m_bubbleLayout->addStretch(); // pushes bubbles upward
 
     m_scrollArea->setWidget(m_bubbleContainer);
-    mainLayout->addWidget(m_scrollArea, 1);   // stretch 1
+    mainLayout->addWidget(m_scrollArea, 1); // stretch 1
 
     // ---- Input area ----
-    auto* inputWidget = new QWidget(this);
+    auto *inputWidget = new QWidget(this);
+    inputWidget->setFixedHeight(150);
     inputWidget->setStyleSheet(
-        QString("background:%1; border-top:1px solid %2;")
-            .arg(Theme::bgTopBar(), Theme::borderInput()));
-    auto* inputOuter = new QVBoxLayout(inputWidget);
-    inputOuter->setContentsMargins(8, 6, 8, 2);
-    inputOuter->setSpacing(0);
+        "background:#FFFFFF;"
+        "border-top:1px solid #E5E5E5;");
 
-    auto* inputRow = new QHBoxLayout();
-    inputRow->setSpacing(8);
+    auto *inputOuter = new QVBoxLayout(inputWidget);
+    inputOuter->setContentsMargins(16, 10, 16, 8);
+    inputOuter->setSpacing(8);
 
     m_input = new QLineEdit(this);
-    m_input->setPlaceholderText("Type a message...");
+    m_input->setPlaceholderText("");
+    m_input->setFixedHeight(72);
     m_input->setStyleSheet(
-        QString("QLineEdit {"
-        "  background: white; border: 1px solid %1; border-radius: 4px;"
-        "  padding: 8px; font-size: 13px;"
-        "}"
-        "QLineEdit:focus { border-color: %2; }")
-            .arg(Theme::borderInput(), Theme::green()));
-    inputRow->addWidget(m_input);
+        "QLineEdit {"
+        "  background: #FFFFFF;"
+        "  border: none;"
+        "  padding: 8px;"
+        "  font-size: 14px;"
+        "  color: #222222;"
+        "}");
+    inputOuter->addWidget(m_input);
 
-    m_sendBtn = new QPushButton("Send", this);
+    auto *bottomRow = new QHBoxLayout();
+    bottomRow->setContentsMargins(0, 0, 0, 0);
+    bottomRow->addStretch();
+
+    m_sendBtn = new QPushButton("发送", this);
+    m_sendBtn->setFixedSize(72, 32);
     m_sendBtn->setStyleSheet(
-        QString("QPushButton {"
-        "  background: %1; color: white; border: none; border-radius: 4px;"
-        "  padding: 8px 20px; font-size: 13px; font-weight: bold;"
+        "QPushButton {"
+        "  background: #07C160;"
+        "  color: white;"
+        "  border: none;"
+        "  border-radius: 4px;"
+        "  font-size: 13px;"
         "}"
-        "QPushButton:hover { background: %2; }"
-        "QPushButton:pressed { background: %3; }")
-            .arg(Theme::green(), Theme::greenHover(), Theme::greenPressed()));
-    inputRow->addWidget(m_sendBtn);
-    inputOuter->addLayout(inputRow);
+        "QPushButton:hover { background: #06AD56; }"
+        "QPushButton:pressed { background: #05944A; }");
+    bottomRow->addWidget(m_sendBtn);
+
+    inputOuter->addLayout(bottomRow);
 
     // Inline status label (hidden by default, shown for "Sent ✓" etc.)
     m_statusLabel = new QLabel(this);
     m_statusLabel->setStyleSheet(
         QString("color: %1; font-size: 11px; padding: 0 4px 2px 4px; "
-        "border: none; background: transparent;").arg(Theme::textLight()));
+                "border: none; background: transparent;")
+            .arg(Theme::textLight()));
     m_statusLabel->hide();
     inputOuter->addWidget(m_statusLabel);
 
@@ -114,20 +145,23 @@ ChatWidget::ChatWidget(ChatType type, int targetId, const QString& targetName,
             this, &ChatWidget::onSendClicked);
 }
 
-void ChatWidget::setGroupInfo(const QString& desc,
-                               const QVector<GroupMember>& members)
+void ChatWidget::setGroupInfo(const QString &desc,
+                              const QVector<GroupMember> &members)
 {
-    if (m_chatType != ChatType::Group) return;
+    if (m_chatType != ChatType::Group)
+        return;
 
     m_groupInfoLabel->setText(
         QString("<b>Group ID:</b> %1 &nbsp;|&nbsp; <b>Description:</b> %2")
-            .arg(m_targetId).arg(desc.toHtmlEscaped()));
+            .arg(m_targetId)
+            .arg(desc.toHtmlEscaped()));
 
     m_groupMemberList->clear();
-    for (const auto& m : members) {
+    for (const auto &m : members)
+    {
         QString stateIcon = (m.state == "online") ? "🟢" : "⚫";
         QString roleTag = (m.role == "creator") ? " [Creator]" : "";
-        auto* item = new QListWidgetItem(
+        auto *item = new QListWidgetItem(
             QString("%1 %2%3 (ID:%4)")
                 .arg(stateIcon, m.name, roleTag)
                 .arg(m.id));
@@ -137,17 +171,20 @@ void ChatWidget::setGroupInfo(const QString& desc,
     }
 }
 
-void ChatWidget::appendMessage(const ChatMessage& msg)
+void ChatWidget::appendMessage(const ChatMessage &msg)
 {
     bool isSelf = (msg.fromId == m_client->userId());
 
     // Determine which name to show above the bubble
     QString displayName;
     bool showName = false;
-    if (m_chatType == ChatType::Group && !isSelf) {
+    if (m_chatType == ChatType::Group && !isSelf)
+    {
         displayName = msg.fromName;
         showName = true;
-    } else if (isSelf) {
+    }
+    else if (isSelf)
+    {
         displayName = m_client->userName();
     }
 
@@ -157,22 +194,23 @@ void ChatWidget::appendMessage(const ChatMessage& msg)
         timestamp = QDateTime::currentDateTime().toString("hh:mm:ss");
 
     // Insert bubble before the trailing stretch
-    auto* bubble = new BubbleWidget(m_bubbleContainer);
+    auto *bubble = new BubbleWidget(m_bubbleContainer);
     bubble->setMessage(displayName, msg.message, timestamp, isSelf, showName);
     m_bubbleLayout->insertWidget(m_bubbleLayout->count() - 1, bubble);
 
     scrollToBottom();
 
     // Track unread if not visible
-    if (!isVisible() && !m_hasUnread) {
+    if (!isVisible() && !m_hasUnread)
+    {
         m_hasUnread = true;
         emit unreadChanged();
     }
 }
 
-void ChatWidget::appendSystemMessage(const QString& text)
+void ChatWidget::appendSystemMessage(const QString &text)
 {
-    auto* label = new QLabel(text, m_bubbleContainer);
+    auto *label = new QLabel(text, m_bubbleContainer);
     label->setAlignment(Qt::AlignCenter);
     label->setStyleSheet(
         QString("color:%1; font-size:11px; padding:4px 0;").arg(Theme::textLight()));
@@ -191,21 +229,26 @@ void ChatWidget::clearUnread()
 void ChatWidget::onSendClicked()
 {
     QString msg = m_input->text().trimmed();
-    if (msg.isEmpty()) return;
+    if (msg.isEmpty())
+        return;
 
-    if (m_chatType == ChatType::Private) {
+    if (m_chatType == ChatType::Private)
+    {
         m_client->sendPrivateMessage(m_targetId, msg);
-    } else {
+    }
+    else
+    {
         m_client->sendGroupMessage(m_targetId, msg);
     }
 
     // Echo own message locally
     ChatMessage self;
-    self.msgId    = (m_chatType == ChatType::Private)
-                    ? MessageType::ONE_CHAT_MSG : MessageType::GROUP_CHAT_MSG;
-    self.fromId   = m_client->userId();
+    self.msgId = (m_chatType == ChatType::Private)
+                     ? MessageType::ONE_CHAT_MSG
+                     : MessageType::GROUP_CHAT_MSG;
+    self.fromId = m_client->userId();
     self.fromName = m_client->userName();
-    self.message  = msg;
+    self.message = msg;
     self.sendTime = QDateTime::currentDateTime().toString("hh:mm:ss");
     appendMessage(self);
 
@@ -213,34 +256,35 @@ void ChatWidget::onSendClicked()
     flashStatus("Sent ✓");
 }
 
-void ChatWidget::flashStatus(const QString& text, int durationMs)
+void ChatWidget::flashStatus(const QString &text, int durationMs)
 {
     m_statusLabel->setText(text);
     m_statusLabel->show();
-    QTimer::singleShot(durationMs, this, [this]() {
-        m_statusLabel->hide();
-    });
+    QTimer::singleShot(durationMs, this, [this]()
+                       { m_statusLabel->hide(); });
 }
 
 void ChatWidget::scrollToBottom()
 {
-    QTimer::singleShot(20, this, [this]() {
+    QTimer::singleShot(20, this, [this]()
+                       {
         QScrollBar* sb = m_scrollArea->verticalScrollBar();
-        sb->setValue(sb->maximum());
-    });
+        sb->setValue(sb->maximum()); });
 }
 
 void ChatWidget::restyle()
 {
     // Group header (only for group chats)
-    if (m_chatType == ChatType::Group && m_groupHeader) {
+    if (m_chatType == ChatType::Group && m_groupHeader)
+    {
         m_groupInfoLabel->setStyleSheet(
             QString("background:%1; padding:6px; border-radius:4px; "
-            "font-size:12px; color:%2;").arg(Theme::groupHeaderBg(), Theme::textPrimary()));
+                    "font-size:12px; color:%2;")
+                .arg(Theme::groupHeaderBg(), Theme::textPrimary()));
         m_groupMemberList->setStyleSheet(
             QString("QListWidget { background:%1; font-size:11px; "
-            "border:1px solid %2; }"
-            "QListWidget::item { padding:2px 4px; }")
+                    "border:1px solid %2; }"
+                    "QListWidget::item { padding:2px 4px; }")
                 .arg(Theme::bgInput(), Theme::borderCard()));
     }
 
@@ -249,52 +293,56 @@ void ChatWidget::restyle()
         QString("QScrollArea { background: %1; }").arg(Theme::bgChat()));
 
     // Input widget (the container)
-    QWidget* inputWidget = m_input->parentWidget()->parentWidget() ?
-        qobject_cast<QWidget*>(m_input->parentWidget()->parentWidget()) : nullptr;
+    QWidget *inputWidget = m_input->parentWidget()->parentWidget() ? qobject_cast<QWidget *>(m_input->parentWidget()->parentWidget()) : nullptr;
     // Actually, inputWidget is the direct parent layout's parent widget
     // Let's just re-style input and sendBtn directly
 
     // Input field
     m_input->setStyleSheet(
         QString("QLineEdit {"
-        "  background: white; border: 1px solid %1; border-radius: 4px;"
-        "  padding: 8px; font-size: 13px;"
-        "}"
-        "QLineEdit:focus { border-color: %2; }")
+                "  background: white; border: 1px solid %1; border-radius: 4px;"
+                "  padding: 8px; font-size: 13px;"
+                "}"
+                "QLineEdit:focus { border-color: %2; }")
             .arg(Theme::borderInput(), Theme::green()));
 
     // Send button
     m_sendBtn->setStyleSheet(
         QString("QPushButton {"
-        "  background: %1; color: white; border: none; border-radius: 4px;"
-        "  padding: 8px 20px; font-size: 13px; font-weight: bold;"
-        "}"
-        "QPushButton:hover { background: %2; }"
-        "QPushButton:pressed { background: %3; }")
+                "  background: %1; color: white; border: none; border-radius: 4px;"
+                "  padding: 8px 20px; font-size: 13px; font-weight: bold;"
+                "}"
+                "QPushButton:hover { background: %2; }"
+                "QPushButton:pressed { background: %3; }")
             .arg(Theme::green(), Theme::greenHover(), Theme::greenPressed()));
 
     // Status label
     m_statusLabel->setStyleSheet(
         QString("color: %1; font-size: 11px; padding: 0 4px 2px 4px; "
-        "border: none; background: transparent;").arg(Theme::textLight()));
+                "border: none; background: transparent;")
+            .arg(Theme::textLight()));
 
     // Input area background (traverse up to the container widget)
-    QWidget* inputArea = m_input->parentWidget();
-    if (inputArea) {
+    QWidget *inputArea = m_input->parentWidget();
+    if (inputArea)
+    {
         inputArea->setStyleSheet(
             QString("background:%1; border-top:1px solid %2;")
                 .arg(Theme::bgTopBar(), Theme::borderInput()));
     }
 
     // Restyle all existing bubble widgets in the chat area
-    for (BubbleWidget* bw : m_bubbleContainer->findChildren<BubbleWidget*>()) {
+    for (BubbleWidget *bw : m_bubbleContainer->findChildren<BubbleWidget *>())
+    {
         bw->restyle();
     }
 
     // Restyle system message labels
-    for (QLabel* label : m_bubbleContainer->findChildren<QLabel*>()) {
+    for (QLabel *label : m_bubbleContainer->findChildren<QLabel *>())
+    {
         // Only restyle system-message labels (centered, not inside a BubbleWidget)
-        if (label->alignment() == Qt::AlignCenter && !label->parentWidget()->inherits("BubbleWidget")) {
+        if (label->alignment() == Qt::AlignCenter && !label->parentWidget()->inherits("BubbleWidget"))
+        {
             label->setStyleSheet(
                 QString("color:%1; font-size:11px; padding:4px 0;").arg(Theme::textLight()));
         }
